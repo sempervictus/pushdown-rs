@@ -1,0 +1,44 @@
+[package]
+name = "pushdown-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Pushdown automata (PDA/DPDA/NPDA) as composable traits, compiled from any finite-state grammar, producing flat bitvec machine encodings for CPU/SIMD/GPU execution"
+license = "MIT"
+repository = "https://github.com/sempervictus/pushdown-rs"
+keywords = ["pushdown", "pda", "dpda", "automata", "grammar", "constrained-decoding"]
+categories = ["compilers", "science"]
+
+# the local benchmark fixtures (the the 248K tokenizer + the grammar samples) are
+# dev-only; they are not part of the published package.
+exclude = [
+    "bench_realworld/",
+]
+
+[dependencies]
+bitvec = "1"
+rten-simd = { version = "0.26", optional = true }
+smoltcp = { version = "0.12", optional = true }
+
+[features]
+default = ["simd"]
+# the SIMD branch (the the rten-simd). ON by default: the the step_batch/
+# project_batch streaming interface is the primary path. The scalar code stays
+# as the fallback when the simd feature is disabled (the the --no-default-features).
+simd = ["dep:rten-simd"]
+# the CUDA FFI declarations (the the extern "C" block, the the pda_ffi.h contract).
+# The the attention-rs provides the implementations; this is the declaration
+# side (the the compiles without a GPU, the the links against the attention-rs).
+cuda = []
+# the DPDK line-rate NIC backend (the the rust-dpdk-net style). When on, the
+# appliance uses the DPDK rx/tx rings; when off, the native NIC binding.
+dpdk = []
+# the smoltcp packet-structure adapter (the the smoltcp owns the wire formats;
+# the PDA validates the same structure smoltcp parses).
+smoltcp = ["dep:smoltcp"]
+
+[dev-dependencies]
+criterion = "0.5"
+nom = "7"
+deku = "0.20"
+tokenizers = "0.13"
+serde_json = "1"

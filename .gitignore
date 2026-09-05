@@ -1,0 +1,21 @@
+# the build artifacts
+/target
+
+# the local benchmark fixtures + docs (the the 20MB tokenizer, the grammar
+# samples, the outputs, the methodology). Never committed, not part of the
+# crates.io package.
+bench_realworld/
+
+# the library convention: the no committed lock file (the the downstream generates
+# its own)
+Cargo.lock
+
+# the IDE / the editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
+# the local-only dev validation tool (the the needs the llguidance + the 248K tokenizer;
+# the committed Cargo.toml cannot satisfy it - run with a local Cargo.toml modification)
+examples/bench_realworld.rs
+.commitmsg
