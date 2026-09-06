@@ -42,3 +42,13 @@ nom = "7"
 deku = "0.20"
 tokenizers = "0.13"
 serde_json = "1"
+
+[[bench]]
+name = "simd_bench"
+harness = false
+required-features = ["simd"]
+
+[[bench]]
+name = "modality_bench"
+harness = false
+required-features = ["simd"]

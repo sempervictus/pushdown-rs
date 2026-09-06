@@ -48,18 +48,35 @@ The device PDA (the step_batch) is slower than the scalar at small batch
 (the per-item Vec allocation). The step_batch_into (the no-alloc) + the
 step_batch_simd close this gap.
 
-## The test suite (the 30 tests + the 1 doc-test)
+## The test suite (the 46 tests + the 1 doc-test)
 
 - The {a^n b^n} DPDA: the accepts ab/aabb/aaabbb, the rejects aab/abab.
-- The RTN compilation: the kappa(G) exact, the deterministic + the
-  ambiguous cases.
-- The bitvec: the round-trip lossless, the truncation rejected.
+- The RTN compilation: the kappa(G) exact (the heterogeneous grammars), the
+  deterministic + the ambiguous cases.
+- The bitvec: the round-trip lossless, the truncation rejected, the exact POD
+  size formula (the header + the accepting + the transitions + the provenance
+  suffix).
 - The scaling: the small-to-large inputs.
-- The proofs: the determinism, the bounded stack, the mask fidelity, the
-  projection, the SWYB soundness, the PSC codebook, the token spanner, the batched
-  invariants, the CUDA graph, the no-unsafe.
+- The state provenance (the RTN state -> nonterminal projection, the
+  Definition 5): the inclusive + exclusive oracle (the total + the disjoint
+  families, the exact kappa length) across the edge-case grammars (the
+  eps-production, the single nonterminal, the unit chain, the recursion), the
+  phase-homology (the terminal/choice/exit/start moves preserve the phase,
+  the call/return moves change it to the callee/caller), the bitvec round-trip.
+- The proofs: the determinism (the discriminating, the no-dup-key vs the
+  deterministic + the dup-key for the ambiguous), the bounded stack (the
+  reachable depth <= D, the per push bound), the mask fidelity (the PSC
+  classifier == the machine's legal inputs over the full config space), the
+  projection (the project(K) == the K sequential steps, the break on
+  divergence), the SWYB soundness (the d_H <= H for all reachable, the d_H = 0
+  unconditional for the accepting), the PSC codebook, the token spanner, the
+  batched invariants, the CUDA graph, the no-unsafe.
+- The epsilon-closure advance (the step_batch / the project_batch follow the
+  epsilon moves to the terminal state, the no stuck call dots): the S -> a A b,
+  A -> c grammar advances through the A call + the differential oracle agrees.
 - The differential: the PDA == the independent oracle (the {a^n b^n} + the
-  balanced-parens).
+  balanced-parens + the multi-nonterminal grammar, the exhaustive + the
+  boundary corpora, the exact acceptance count).
 - The non-deterministic regex: the [a-z]+ uses the accepts_npda.
 
-Run: `cargo test` (the 30 tests + the 1 doc-test, the all green).
+Run: `cargo test` (the 46 tests + the 1 doc-test, the all green).

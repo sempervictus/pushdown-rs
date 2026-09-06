@@ -7,18 +7,17 @@ The coherent doc set for the pushdown-rs core library.
   implementations (the PdaMachine, the Pda trait hierarchy, the
   PdaStream, the service).
 - [mathematics.md](mathematics.md) - the formal maths (the 7-tuple, the
-  the RTN compilation, the kappa(G), the proofs).
+  RTN compilation, the kappa(G), the proofs).
 
 ## The PDA variants
 - [pda_variants.md](pda_variants.md) - the 9 variants (the NPDA, the DPDA,
   the epsilon, the final-state, the empty-stack, the VPA, the alternating, the
-  one-way, the nested) - the + the structure + the utility + the
-  implementation.
+  one-way, the nested) - structure, utility, and implementation.
 
 ## The device (the SIMD + the CUDA)
 - [device.md](device.md) - the device plan (the bitvec upload, the
   kernels, the on-device construction, the FFI, the CUDA graph, the
-  the three-way layout-identity proof).
+  three-way layout-identity proof).
 
 ## The integration (the downstream)
 - [integration_plan.md](integration_plan.md) - the llguidance -> the
@@ -31,7 +30,7 @@ The coherent doc set for the pushdown-rs core library.
 
 ## The research (the citations)
 - [research.md](research.md) - the supporting research (the arXiv
-  papers, the classical automences, the RISC precedent, the
+  papers, the classical automata, the RISC precedent, the
   credits).
 
 ## The QA (the accuracy + the benchmarks)

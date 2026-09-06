@@ -37,11 +37,19 @@ The PdaMachine is the concrete 7-tuple with u32 IDs:
      transitions: Vec<Transition>,   // the (q, a, top) -> (next_q, push)
      accepting: Vec<u32>,           // the F
      start_state, start_stack,      // the q0, the Z0
+     state_provenance: Option<Vec<u32>>,  // the RTN state -> nonterminal projection
    }
 ```
 
 The Transition is the (q, a, top) -> (next_q, push). The a is num_inputs for
 the epsilon. The push is the stack string that replaces top (empty = pop).
+
+The state_provenance is the RTN state -> nonterminal projection (the Definition 5
+of arXiv:2603.05540): for each control state, the nonterminal index it belongs to
+(the q_start -> S, the q_A^in/q_A^out -> A, the dot(p,i) -> lhs(p)). It is the
+generic primitive for grammar-phase / region awareness (the consumer maps the
+nonterminal index to a semantic region via the grammar's named nonterminals).
+Some for RTN-compiled machines, None for hand-built ones.
 
 The key groups:
 - The lookup(q, a, top) - the linear-scan reference.
@@ -50,11 +58,16 @@ The key groups:
   vs the NPDA by the is_deterministic).
 - The accepts_dpda / the accepts_npda - the single-path / the BFS.
 - The mask_bits(state) - the O(num_inputs) mask-input scan.
+- The provenance_of(q) - the RTN state -> nonterminal projection (the O(1) lookup).
+- The advance_eps(q, stk, a) - the epsilon-closure advance (the BFS over the
+  epsilon moves to the terminal state, then the terminal move; the no stuck
+  call dots). The step_batch / the project_batch use it.
 - The step_batch / the mask_batch / the project_batch - the PdaStream (the
-  the batched pipeline node).
+  batched pipeline node).
 - The step_batch_into / the step_batch_simd / the project_batch_simd - the
   no-alloc + the SIMD variants.
-- The to_bitvec / the from_bitvec - the lossless POD encoding.
+- The to_bitvec / the from_bitvec - the lossless POD encoding (the state_provenance
+  is the trailing optional suffix).
 
 ## The compilation (the compile.rs)
 
@@ -88,13 +101,13 @@ q, a, top, next_q, push_len, push[]). This is the GPU-uploadable payload.
 ## The device tiers (the simd.rs, the service.rs, the graph.rs, the cuda.rs)
 
 - The simd.rs - the rten-simd vectorized ops (the MaskOp broadcast, the
-  the StepBatchOp). The the simd feature (default on).
+  StepBatchOp). The simd feature (default on).
 - The service.rs - the PdaService (the packet-in/packet-out device
   model, the batched pipeline node boundary).
 - The graph.rs - the PdaGraph (the CUDA DAG of the kernel nodes, the
-  the CUDA graph host-side interface, the mock_replay).
+  CUDA graph host-side interface, the mock_replay).
 - The cuda.rs - the CudaPackage (the bitvec + the primitives, the
-  the H2D payload) + the FFI declarations (the cuda feature).
+  H2D payload) + the FFI declarations (the cuda feature).
 
 The three-way layout-identity invariant: the scalar == the SIMD batch == the
 CUDA kernel, all consuming the same bitvec. This is the proof that the device

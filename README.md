@@ -101,7 +101,7 @@ let ok = m.accepts(&input); // DPDA path if deterministic, NPDA path otherwise
 ## The correctness execution tiers
 
 1. **Scalar** - `accepts_dpda`/`accepts_npda`/`mask_bits` (the reference, always available).
-2. **SIMD** - the `PdaStream` batched ops + the rten-simd `MaskOp`/`StepBatchOp` (the `simd` feature, default on). The host sends a batch of configs, the device returns a batch of results - the batched pipeline node model.
+2. **SIMD** - the `PdaStream` batched ops + the rten-simd `MaskBroadcastOp`/`StepBatchOp` (the `simd` feature, default on). The host sends a batch of configs, the device returns a batch of results - the batched pipeline node model. The `MaskBroadcastOp` vectorizes the logit+mask add across the vocab (proven bit-exact vs scalar by `tests/simd_accuracy.rs`).
 3. **CUDA** - the `CudaPackage` bitvec + the `ffi/pda_ffi.h` contract. The same bitvec the SIMD tier uses, consumed by GPU kernels (the layout-identity invariant: CUDA == SIMD == scalar).
 
 ## Correctness model
@@ -116,9 +116,22 @@ codebook, the token spanner, the batch invariants, and the no-`unsafe` guarantee
 
 - `simd` (default) - the rten-simd vectorized ops.
 - `cuda` - the FFI declarations (the `extern "C"` block; the implementations
-  live in the consuming crate crate).
+  live in the consuming crate).
 
 Build without SIMD: `cargo build --no-default-features`.
+
+## Tests and Benches
+
+- `cargo test` - 30/30 core proofs (language membership, determinism,
+  bounded stack, mask fidelity, projection, bitvec round-trip, SWYB soundness,
+  PSC codebook, token spanner, batch invariants, no-unsafe, differential vs
+  independent oracle).
+- `cargo test --features simd --test simd_accuracy` - 6/6 SIMD accuracy proofs
+  (MaskBroadcastOp == scalar, all-allowed identity, all-disallowed -inf, u8
+  mask dispatch, step batch, compute_bias patterns).
+- `cargo bench --bench simd_bench` - Criterion: scalar vs SIMD at 256/4K/32K/248K
+  vocab. At 4K vocab, SIMD is 2x faster (172ns vs 345ns); at 248K both are
+  memory-bound (~33 GiB/s).
 
 ## References
 

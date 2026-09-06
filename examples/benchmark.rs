@@ -178,6 +178,7 @@ fn main() {
         accepting: vec![3],
         start_state: 0,
         start_stack: Z,
+        state_provenance: None,
     };
     for (name, input, expect) in [
         ("ab", vec![A, B], true),

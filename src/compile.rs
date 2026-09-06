@@ -225,6 +225,28 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
     }
 
     let accepting = vec![q_out(start_nt)];
+    // Build the RTN state -> nonterminal projection (Definition 5 of
+    // arXiv:2603.05540). The control states number exactly kappa(G) and partition
+    // into three families, each tied to one nonterminal; we fill the vector
+    // by walking those families with the same q_in / q_out / dot_ids numbering
+    // used to build the transitions above:
+    //   - q_start            -> start_nt
+    //   - q_in(a), q_out(a)  -> a            (for every nonterminal a)
+    //   - dot_ids[p] (all i) -> nonterminal_index(lhs of production p)
+    // The result is a total function Q -> N of length num_states; see the
+    // `state_provenance` field docs for the phase-homology invariant.
+    let mut state_provenance = vec![0u32; num_states as usize];
+    state_provenance[Q_START as usize] = start_nt;
+    for a in 0..num_nt {
+        state_provenance[q_in(a) as usize] = a;
+        state_provenance[q_out(a) as usize] = a;
+    }
+    for (p_idx, (lhs, _)) in prods.iter().enumerate() {
+        let a_id = g.nonterminal_index(lhs);
+        for &q in &dot_ids[p_idx] {
+            state_provenance[q as usize] = a_id;
+        }
+    }
     Ok(PdaMachine {
         num_states,
         num_inputs: num_tm,
@@ -233,6 +255,7 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
         accepting,
         start_state: Q_START,
         start_stack: 0,
+        state_provenance: Some(state_provenance),
     })
 }
 

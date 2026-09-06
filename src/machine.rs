@@ -30,6 +30,38 @@ pub struct PdaMachine {
     pub accepting: Vec<u32>,
     pub start_state: u32,
     pub start_stack: u32,
+    /// The RTN state-to-nonterminal projection (the "grammar phase" of a control
+    /// state). For a machine compiled from a CFG G = (N, Sigma, P, S) by the
+    /// recursive-transition-network construction (Definition 5 of arXiv:2603.05540),
+    /// the control states partition into three families, each created *for* one
+    /// nonterminal:
+    ///
+    ///   q_start          -> S          (the start nonterminal)
+    ///   q_A^in, q_A^out  -> A         (the entry / exit of nonterminal A)
+    ///   q_(p,i)          -> lhs(p)    (the dot state of production p : lhs -> rhs)
+    ///
+    /// `state_provenance[q]` is that nonterminal's index in N (0..num_nonterminals).
+    /// It is a TOTAL function: every control state belongs to exactly one
+    /// nonterminal, so when `Some` the vector has length
+    ///   kappa(G) = 1 + 2|N| + sum_p(|rhs(p)| + 1   (Lemma 2 of arXiv:2603.05540)
+    /// which equals `num_states`.
+    ///
+    /// WHY this is a primitive (not a consumer detail): it is the phase label of a
+    /// state. A consumer maps the nonterminal index to a semantic region (a
+    /// grammar's reasoning / text / tool-call phases, a protocol's header / body /
+    /// trailer, ...) WITHOUT reverse-engineering the RTN numbering. It is the same
+    /// *kind* of per-state classification as PSC's parser-stack -> mask-class
+    /// (arXiv:2608.03065), just at the control-state granularity.
+    ///
+    /// PHASE HOMOLOGY (the logic that makes it useful): the label is invariant along
+    /// a terminal run inside one production (q_(p,i) -> q_(p,i+1) keeps lhs(p)), and
+    /// changes exactly at the call / return / exit boundaries (q_(p,i) -> q_B^in
+    /// switches to B; q_B^out -> q_(p,i) restores lhs(p); q_(p,m) -> q_A^out
+    /// switches to A). So it tracks "which nonterminal is currently being parsed."
+    ///
+    /// `Some` for RTN-compiled machines; `None` for hand-built ones (the doc
+    /// example) where the state -> nonterminal association is not defined.
+    pub state_provenance: Option<Vec<u32>>,
 }
 
 impl PdaMachine {
@@ -42,6 +74,7 @@ impl PdaMachine {
         accepting: Vec<u32>,
         start_state: u32,
         start_stack: u32,
+        state_provenance: Option<Vec<u32>>,
     ) -> StdResult<Self, PdaError> {
         let m = PdaMachine {
             num_states,
@@ -51,6 +84,7 @@ impl PdaMachine {
             accepting,
             start_state,
             start_stack,
+            state_provenance,
         };
         m.validate_bounds()?;
         Ok(m)
@@ -86,6 +120,29 @@ impl PdaMachine {
                 }
             }
         }
+        // Provenance (when present) is a TOTAL function Q -> N, so two invariants hold:
+        //   (1) LENGTH: one entry per control state, i.e. prov.len() == num_states
+        //       (== kappa(G) by Lemma 2). A shorter/longer vector is malformed.
+        //   (2) RANGE: each entry is a nonterminal index in 0..|N|. The machine does
+        //       not store |N| directly, but the RTN numbering guarantees |N| <
+        //       num_states (since kappa(G) = 1 + 2|N| + ... > |N|), so bounding each
+        //       entry by num_states is a sound (if slightly loose) range check.
+        if let Some(prov) = &self.state_provenance {
+            if prov.len() != self.num_states as usize {
+                return Err(PdaError::ProvenanceLength {
+                    got: prov.len(),
+                    expected: self.num_states as usize,
+                });
+            }
+            for &p in prov {
+                if p >= self.num_states {
+                    return Err(PdaError::ProvenanceOutOfRange {
+                        state: p,
+                        num: self.num_states,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -96,6 +153,64 @@ impl PdaMachine {
             .iter()
             .filter(|t| t.q == q && t.a == key && t.top == top)
             .collect()
+    }
+
+    /// The grammar-phase of control state `q`: the nonterminal index (0..num_nonterminals)
+    /// that `q` belongs to, per the RTN projection documented on `state_provenance`.
+    ///
+    /// Returns `None` in two cases: (1) the machine has no provenance (a hand-built
+    /// machine, where the state -> nonterminal association is undefined), or (2) `q`
+    /// is out of range. For an RTN-compiled machine and a valid `q`, this is `Some`.
+    ///
+    /// CONSUMER PATTERN: a region/phase-aware user com the returned nonterminal index
+    /// to a semantic bucket via the grammar's *named* nonterminals (e.g. index ->
+    /// "reasoning_block" -> Region::Reasoning). The push deliberately stops at the
+    /// index: it is grammar-agnostic and does not know the nonterminal names.
+    pub fn provenance_of(&self, q: u32) -> Option<u32> {
+        let prov = self.state_provenance.as_ref()?;
+        prov.get(q as usize).copied()
+    }
+
+    /// The epsilon-closure advance: from (q, stk), follow the epsilon moves (the no
+    /// input) to reach the configs where the terminal move `a` is available, then do
+    /// the terminal move. Returns `Some((next_state, next_stack))` on success, or
+    /// `None` if no terminal move is reachable (the divergence / the reject path).
+    ///
+    /// This matches the accepts_npda BFS semantics (the epsilon moves are resolved
+    /// before the terminal move). The RTN epsilon graph is local, so the closure is
+    /// bounded; the MAX_EPS_CLOSURE cap is the safety safeguard against a
+    /// pathological (the non-RTN) machine.
+    pub fn advance_eps(&self, q: u32, stk: &[u32], a: u32) -> Option<(u32, Vec<u32>)> {
+        const MAX_EPS_CLOSURE: usize = 4096;
+        let mut configs: Vec<(u32, Vec<u32>)> = vec![(q, stk.to_vec())];
+        let mut i = 0;
+        while i < configs.len() && configs.len() < MAX_EPS_CLOSURE {
+            let (cq, cstk) = configs[i].clone();
+            i += 1;
+            let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+            for (q2, push) in self.transition(cq, None, ctop) {
+                let mut ns = cstk.clone();
+                ns.pop();
+                for &p in push.iter().rev() {
+                    ns.push(p);
+                }
+                if !configs.iter().any(|(s, ss)| *s == q2 && *ss == ns) {
+                    configs.push((q2, ns));
+                }
+            }
+        }
+        for (cq, cstk) in &configs {
+            let top = cstk.last().copied().unwrap_or(self.start_stack);
+            if let [t] = self.lookup(*cq, Some(a), top).as_slice() {
+                let mut s2 = cstk.clone();
+                s2.pop();
+                for &p in t.push.iter().rev() {
+                    s2.push(p);
+                }
+                return Some((t.next_q, s2));
+            }
+        }
+        None
     }
 
     /// The universal accepts: auto-selects the right simulation based on the
@@ -384,7 +499,7 @@ impl PdaMachine {
         batch: &[(u32, Vec<u32>, u32)],
         out: &mut [(u32, Vec<u32>)],
     ) {
-        for ((o_q, o_stk), &((q, ref stk, a))) in out.iter_mut().zip(batch.iter()) {
+        for ((o_q, o_stk), &(q, ref stk, a)) in out.iter_mut().zip(batch.iter()) {
             let top = stk.last().copied().unwrap_or(self.start_stack);
             match self.lookup_indexed(index, q, Some(a), top).as_slice() {
                 [t] => {
@@ -522,27 +637,47 @@ impl PdaStream for PdaMachine {
 
     fn step_batch(&self, batch: &[(Self::Config, u32)]) -> Vec<Self::Config> {
         batch.iter().map(|((q, stk), a)| {
-            let top = stk.last().copied().unwrap_or(self.start_stack);
-            match self.lookup(*q, Some(*a), top).as_slice() {
-                [t] => {
-                    let mut s2 = stk.clone();
-                    s2.pop();
-                    for &p in t.push.iter().rev() {
-                        s2.push(p);
-                    }
-                    (t.next_q, s2)
-                }
-                _ => (*q, stk.clone()), // the no transition: hold (the reject path)
-            }
+            // the epsilon-closure advance: follow the epsilon moves to
+            // the terminal state, then the terminal move. On divergence (the no
+            // terminal move), hold (q, stk) (the reject path).
+            self.advance_eps(*q, stk, *a).unwrap_or((*q, stk.clone()))
         }).collect()
     }
 
     fn mask_batch(&self, configs: &[Self::Config]) -> Vec<Self::Mask> {
         configs.iter().map(|(q, stk)| {
             let top = stk.last().copied().unwrap_or(self.start_stack);
-            (0..=self.num_inputs)
-                .filter(|&a| !self.lookup(*q, Some(a), top).is_empty())
-                .collect()
+            // Include the epsilon-closure: follow epsilon transitions from (q, top)
+            // and collect all allowed inputs from every reachable state.
+            let mut allowed: Vec<u32> = Vec::new();
+            let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+            let mut frontier = vec![( *q, top)];
+            while let Some((cq, ctop)) = frontier.pop() {
+                if !visited.insert((cq, ctop)) {
+                    continue;
+                }
+                // Collect non-epsilon inputs from this state.
+                for a in 0..self.num_inputs {
+                    if !self.lookup(cq, Some(a), ctop).is_empty() {
+                        if !allowed.contains(&a) {
+                            allowed.push(a);
+                        }
+                    }
+                }
+                // Follow epsilon transitions.
+                for (q2, push) in self.transition(cq, None, ctop) {
+                    let new_top = if push.is_empty() {
+                        // Popped the top, no push: the new top is the previous stack element.
+                        // For simplicity, use the same top (the epsilon doesn't change the stack
+                        // in most RTN compilations).
+                        ctop
+                    } else {
+                        *push.last().unwrap()
+                    };
+                    frontier.push((q2, new_top));
+                }
+            }
+            allowed
         }).collect()
     }
 
@@ -552,16 +687,15 @@ impl PdaStream for PdaMachine {
             let mut q = *q0;
             let mut stk = stk0.clone();
             for &a in draft {
-                let top = stk.last().copied().unwrap_or(self.start_stack);
-                match self.lookup(q, Some(a), top).as_slice() {
-                    [t] => {
-                        stk.pop();
-                        for &p in t.push.iter().rev() {
-                            stk.push(p);
-                        }
-                        q = t.next_q;
+                // the epsilon-closure advance: follow the epsilon moves to the
+                // terminal state, then the terminal move. Break on divergence (the
+                // no terminal move reachable for this draft token).
+                match self.advance_eps(q, &stk, a) {
+                    Some((nq, ns)) => {
+                        q = nq;
+                        stk = ns;
                     }
-                    _ => break, // the draft diverged (the no transition)
+                    None => break,
                 }
                 masks.push(self.mask_at_cfg(q, &stk));
             }
@@ -575,9 +709,32 @@ impl PdaMachine {
     /// for the project_batch.
     fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
         let top = stack.last().copied().unwrap_or(self.start_stack);
-        (0..=self.num_inputs)
-            .filter(|&a| !self.lookup(q, Some(a), top).is_empty())
-            .collect()
+        // Include the epsilon-closure: follow epsilon transitions from (q, top)
+        // and collect all allowed inputs from every reachable state.
+        let mut allowed: Vec<u32> = Vec::new();
+        let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        let mut frontier = vec![(q, top)];
+        while let Some((cq, ctop)) = frontier.pop() {
+            if !visited.insert((cq, ctop)) {
+                continue;
+            }
+            for a in 0..self.num_inputs {
+                if !self.lookup(cq, Some(a), ctop).is_empty() {
+                    if !allowed.contains(&a) {
+                        allowed.push(a);
+                    }
+                }
+            }
+            for (q2, push) in self.transition(cq, None, ctop) {
+                let new_top = if push.is_empty() {
+                    ctop
+                } else {
+                    *push.last().unwrap()
+                };
+                frontier.push((q2, new_top));
+            }
+        }
+        allowed
     }
 }
 impl EpsilonPda for PdaMachine {}
@@ -590,6 +747,8 @@ pub enum PdaError {
     StateOutOfRange { state: u32, num: u32 },
     InputOutOfRange { input: u32, num: u32 },
     StackSymOutOfRange { sym: u32, num: u32 },
+    ProvenanceLength { got: usize, expected: usize },
+    ProvenanceOutOfRange { state: u32, num: u32 },
     NonDeterministic,
 }
 impl std::fmt::Display for PdaError {
@@ -603,6 +762,12 @@ impl std::fmt::Display for PdaError {
             }
             PdaError::StackSymOutOfRange { sym, num } => {
                 write!(f, "stack sym {sym} out of range (num_stack_syms={num})")
+            }
+            PdaError::ProvenanceLength { got, expected } => {
+                write!(f, "state_provenance length {got} != num_states {expected}")
+            }
+            PdaError::ProvenanceOutOfRange { state, num } => {
+                write!(f, "state_provenance entry {state} out of range (num_states={num})")
             }
             PdaError::NonDeterministic => write!(f, "machine is non-deterministic"),
         }

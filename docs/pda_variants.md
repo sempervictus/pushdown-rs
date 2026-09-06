@@ -77,7 +77,10 @@ function, + the implementation in this crate.
 
 ## The PdaStream (the batched / the batched pipeline node)
 - The maths: the batch of configs is processed in parallel (the batched
-  node model). The the step_batch / the mask_batch / the project_batch.
+  node model). The the step_batch / the mask_batch / the project_batch. The
+  step_batch and the project_batch use the epsilon-closure advance (the
+  advance_eps, the no stuck call dots) — consistent with the mask (the
+  mask_at_cfg, the epsilon-closure of the allowed inputs).
 - The utility: the SIMD/GPU execution (the B sequences in vectors).
 - The implementation: the PdaStream trait + the PdaMachine's batched methods +
   the PdaService (the packet-in/packet-out).

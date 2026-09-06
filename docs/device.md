@@ -86,7 +86,7 @@ the correctness oracle for the fused version.
 - The kernel: the K sequential steps (the pushdown), the emit the K+1 masks.
 
 ## DP-5: the on-device construction (the SWYB on-the-fly config database)
-- OWNED BY THE attention-rs (the it owns the CUDA). The pushdown-rs
+- OWNED BY THE attention-rs (it owns the CUDA). The pushdown-rs
   provides the source primitives (the LR states, the lexer DFA, the
   the tokenizer bytes, the signature partition) as the upload payload; the
   attention-rs builds the per-config masks on the GPU (the batched, the
@@ -108,7 +108,7 @@ See ffi/pda_ffi.h for the exact C signatures.
 The PdaGraph captures the kernel sequence as a DAG (the H2D -> the
 ComputeMasks -> the Sample -> the Advance -> the D2H). The CUDA graph
 optimization captures this DAG once + replays it (the no per-step launch
-overhead). The graph.rs are the GraphNode enum (the H2D, the ComputeMasks,
+overhead). The graph.rs defines the GraphNode enum (the H2D, the ComputeMasks,
 the Sample, the Advance, the ProjectMasks, the D2H). The graph.edges are the
 dependencies. The topo_order validates the DAG. The mock_replay simulates the
 replay on the CPU (the layout-identity oracle).
@@ -116,7 +116,7 @@ replay on the CPU (the layout-identity oracle).
 ## The three-way proof (the layout-identity)
 
 1. The scalar (the accepts_dpda/mask_bits) == the independent oracle (the
-   the language correctness).
+   language correctness).
 2. The SIMD batch (the step_batch) == the scalar per-item (the batched
    invariant).
 3. The CUDA kernel (the pda_step_batch) == the SIMD batch (the

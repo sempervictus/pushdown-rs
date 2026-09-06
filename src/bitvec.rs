@@ -48,6 +48,15 @@ impl PdaMachine {
     ///   num_states, num_inputs, num_stack_syms, num_transitions, num_accepting,
     ///   start_state, start_stack, the accepting IDs, then per transition:
     ///   q, a, top, next_q, push_len, push[0..push_len).
+    ///   Then an OPTIONAL provenance suffix: a flag (0/1); when 1, the
+    ///   state_provenance entries (num_states of them) follow.
+    ///
+    /// The suffix is a trailing append, so the header + accepting + transitions
+    /// prefix is unchanged (the layout stays forward-compatible for readers that
+    /// stop before the flag). Because the provenance lives in the same POD bitvec,
+    /// every device tier (the scalar, the SIMD, the CUDA) reconstructs it for free
+    /// via `from_bitvec` (the three-way layout-identity invariant) (the primitive
+    /// trickles up from one serialization, not three).
     pub fn to_bitvec(&self) -> Bits {
         let mut bits = Bits::new();
         for &x in &[
@@ -73,6 +82,16 @@ impl PdaMachine {
             for &s in &t.push {
                 push_u32(&mut bits, s);
             }
+        }
+        // the optional provenance suffix (the flag + the entries).
+        match &self.state_provenance {
+            Some(prov) => {
+                push_u32(&mut bits, 1);
+                for &p in prov {
+                    push_u32(&mut bits, p);
+                }
+            }
+            None => push_u32(&mut bits, 0),
         }
         bits
     }
@@ -110,6 +129,21 @@ impl PdaMachine {
                 push,
             });
         }
+        // the optional provenance suffix (the flag + the entries). The flag is 1 for an
+        // RTN-compiled machine (num_states entries follow) and 0 for a hand-built
+        // one (no entries). Any other value is treated as "absent" (the malformed
+        // case is caught by validate_bounds' length check downstream).
+        let prov_flag = load_u32(bits, &mut off)?;
+        let state_provenance = match prov_flag {
+            1 => {
+                let mut prov = Vec::with_capacity(num_states as usize);
+                for _ in 0..num_states {
+                    prov.push(load_u32(bits, &mut off)?);
+                }
+                Some(prov)
+            }
+            _ => None,
+        };
         let m = PdaMachine {
             num_states,
             num_inputs,
@@ -118,6 +152,7 @@ impl PdaMachine {
             accepting,
             start_state,
             start_stack,
+            state_provenance,
         };
         m.validate_bounds().map_err(|e| BitvecError::Malformed(e.to_string()))?;
         Ok(m)

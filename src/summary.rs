@@ -130,6 +130,57 @@ pub struct SwybDecoder<'a> {
     pub beam_width: usize,
 }
 
+/// The termination proof result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminationProof {
+    /// The grammar can terminate: the accepting state is reachable from
+    /// the start config within the stack bound.
+    Proven {
+        /// The minimum number of tokens to reach acceptance (the d_H).
+        min_tokens_to_accept: u32,
+        /// The total number of reachable configs (the proof space).
+        reachable_configs: usize,
+    },
+    /// The grammar has a dead-end: no path from start to accepting state
+    /// within the stack bound. Generation would run on indefinitely.
+    DeadEnd {
+        /// The number of reachable configs that CANNOT reach acceptance.
+        stuck_configs: usize,
+        /// The total reachable configs.
+        reachable_configs: usize,
+    },
+}
+
+impl BoundedSummary {
+    /// Prove that the PDA can terminate: from the start config, there exists
+    /// a path to the accepting state within the stack bound H.
+    ///
+    /// This is the compile-time proof that prevents run-on generation:
+    /// if the grammar has a dead-end (no path to EOS/EOR/EOT), the proof
+    /// fails and the caller should reject the grammar.
+    pub fn prove_termination(&self, machine: &PdaMachine) -> TerminationProof {
+        let start = (machine.start_state, vec![machine.start_stack]);
+        match self.distance.get(&start) {
+            Some(&d) => TerminationProof::Proven {
+                min_tokens_to_accept: d,
+                reachable_configs: self.reachable.len(),
+            },
+            None => {
+                // Count how many reachable configs are stuck (no distance).
+                let stuck = self
+                    .reachable
+                    .iter()
+                    .filter(|(q, _)| !machine.accepting.contains(q))
+                    .count();
+                TerminationProof::DeadEnd {
+                    stuck_configs: stuck,
+                    reachable_configs: self.reachable.len(),
+                }
+            }
+        }
+    }
+}
+
 impl<'a> SwybDecoder<'a> {
     pub fn new(machine: &'a PdaMachine, summary: &'a BoundedSummary, beam_width: usize) -> Self {
         SwybDecoder {

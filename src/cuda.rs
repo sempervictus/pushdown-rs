@@ -15,7 +15,7 @@ use crate::bitvec::BitvecError;
 use crate::machine::PdaMachine;
 use bitvec::prelude::*;
 
-/// The CUDA-ready output (the bitvec + the source primitives).
+/// The CUDA-ready output (the bitvec + the source primitives + the CSR index).
 #[derive(Debug, Clone)]
 pub struct CudaPackage {
     /// the bitvec (the flat POD encoding of the PdaMachine).
@@ -28,19 +28,53 @@ pub struct CudaPackage {
     pub num_stack_syms: u32,
     /// the number of transitions (the |delta|).
     pub num_transitions: u32,
+    /// CSR u32 indices: for each ctrl state q, the u32 index into the flat
+    /// transition array where q's records begin. The GPU kernel uses this
+    /// for O(1) jump (instead of walking from index 0).
+    /// Length = num_states. The sentinel value (total array length) marks
+    /// the end of the last state's records.
+    pub ctrl_u32_offsets: Vec<u32>,
 }
 
 impl CudaPackage {
     /// Build the CUDA package from the machine (the bitvec + the source
-    /// primitives). The thevec is the POD table (the GPU-uploadable).
+    /// primitives + the CSR byte offsets).
     pub fn from_machine(m: &PdaMachine) -> Result<Self, BitvecError> {
         let bitvec = m.to_bitvec();
+        // Compute the CSR u32 indices: for each ctrl state q, the u32 index
+        // into the flat transition array where q's records begin.
+        // The flat array layout: (q, a, top, next_q, push_len, push[]) per record.
+        // Each record is 5 + push_len u32s.
+        let num_states = m.num_states as usize;
+        let mut ctrl_u32_offsets = vec![0u32; num_states];
+        // First pass: compute the u32 size of each record.
+        let mut record_u32_sizes: Vec<u32> = Vec::with_capacity(m.transitions.len());
+        for t in &m.transitions {
+            record_u32_sizes.push(5 + t.push.len() as u32); // in u32s
+        }
+        // Second pass: for each ctrl state, find the first record's u32 index.
+        // The records are NOT sorted by q, so we scan all records and record
+        // the minimum u32 index for each q.
+        let mut offsets: Vec<Option<u32>> = vec![None; num_states];
+        let mut running_index: u32 = 0;
+        for (i, t) in m.transitions.iter().enumerate() {
+            if offsets[t.q as usize].is_none() {
+                offsets[t.q as usize] = Some(running_index);
+            }
+            running_index += record_u32_sizes[i];
+        }
+        // Fill in the CSR: states with no transitions get the total size (sentinel).
+        let total_u32s = running_index;
+        for q in 0..num_states {
+            ctrl_u32_offsets[q] = offsets[q].unwrap_or(total_u32s);
+        }
         Ok(CudaPackage {
             num_states: m.num_states,
             num_inputs: m.num_inputs,
             num_stack_syms: m.num_stack_syms,
             num_transitions: m.transitions.len() as u32,
             bitvec,
+            ctrl_u32_offsets,
         })
     }
 
@@ -165,10 +199,11 @@ impl CudaPackage {
 }
 
 /// The FFI declarations (the Rust side of the C ABI contract, the
-/// ffi/pda_ffi.h). The attention-rs provides the CUDA implementations; these
-/// are the declarations the xinfer links against. The layout implementation
-/// lives here; the GPU side is the attention-rs's.
+    /// ffi/pda_ffi.h). The attention-rs provides the CUDA implementations; these
+    /// are the declarations the GPU consumer links against. The layout
+    /// implementation lives here; the GPU side is the attention-rs's.
 #[cfg(feature = "cuda")]
+#[allow(dead_code)] // The FFI declarations are for the consumer (attention-rs).
 mod ffi {
     use std::os::raw::{c_int, c_void};
 
