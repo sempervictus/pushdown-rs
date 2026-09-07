@@ -671,7 +671,9 @@ impl PdaStream for PdaMachine {
                         // in most RTN compilations).
                         ctop
                     } else {
-                        *push.last().unwrap()
+                        // The push is applied in reverse (the step_batch's iter().rev()), so the
+                        // new top is push.first() (the push[0], the return address for a call).
+                        *push.first().unwrap()
                     };
                     frontier.push((q2, new_top));
                 }
@@ -726,7 +728,9 @@ impl PdaMachine {
                 let new_top = if push.is_empty() {
                     ctop
                 } else {
-                    *push.last().unwrap()
+                    // The push is applied in reverse (the step_batch's iter().rev()), so the
+                    // new top is push.first() (the push[0], the return address for a call).
+                    *push.first().unwrap()
                 };
                 frontier.push((q2, new_top));
             }
