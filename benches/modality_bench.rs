@@ -42,6 +42,7 @@ fn test_machine() -> PdaMachine {
         start_state: 0,
         start_stack: Z,
         state_provenance: None,
+        vocab_names: None,
     }
 }
 

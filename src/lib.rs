@@ -78,6 +78,7 @@
 //!     start_state: 0,
 //!     start_stack: Z,
 //!     state_provenance: None, // the hand-built machine (the no RTN provenance)
+//!     vocab_names: None, // the hand-built machine (the no vocabulary labels)
 //! };
 //! assert!(m.is_deterministic());
 //! assert!(m.accepts_dpda(&[A, B]));

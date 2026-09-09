@@ -179,6 +179,7 @@ fn main() {
         start_state: 0,
         start_stack: Z,
         state_provenance: None,
+        vocab_names: None,
     };
     for (name, input, expect) in [
         ("ab", vec![A, B], true),

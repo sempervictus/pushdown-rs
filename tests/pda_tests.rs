@@ -4,7 +4,7 @@
 //!   - the bitvec round-trip
 
 use pushdown_rs::bitvec::BitvecError;
-use pushdown_rs::compile::{Cfg, kappa};
+use pushdown_rs::compile::{kappa, Cfg};
 use pushdown_rs::machine::{PdaMachine, Transition};
 use pushdown_rs::pda::{Dpda, Npda};
 
@@ -28,23 +28,57 @@ fn anb_n_dpda() -> PdaMachine {
         num_inputs: 2,
         num_stack_syms: 2,
         transitions: vec![
-            Transition { q: 0, a: A, top: Z, next_q: 1, push: vec![A_SYM, Z] },
-            Transition { q: 1, a: A, top: A_SYM, next_q: 1, push: vec![A_SYM, A_SYM] },
-            Transition { q: 1, a: B, top: A_SYM, next_q: 2, push: vec![] },
-            Transition { q: 2, a: B, top: A_SYM, next_q: 2, push: vec![] },
-            Transition { q: 2, a: EPS, top: Z, next_q: 3, push: vec![Z] },
+            Transition {
+                q: 0,
+                a: A,
+                top: Z,
+                next_q: 1,
+                push: vec![A_SYM, Z],
+            },
+            Transition {
+                q: 1,
+                a: A,
+                top: A_SYM,
+                next_q: 1,
+                push: vec![A_SYM, A_SYM],
+            },
+            Transition {
+                q: 1,
+                a: B,
+                top: A_SYM,
+                next_q: 2,
+                push: vec![],
+            },
+            Transition {
+                q: 2,
+                a: B,
+                top: A_SYM,
+                next_q: 2,
+                push: vec![],
+            },
+            Transition {
+                q: 2,
+                a: EPS,
+                top: Z,
+                next_q: 3,
+                push: vec![Z],
+            },
         ],
         accepting: vec![3],
         start_state: 0,
         start_stack: Z,
         state_provenance: None,
+        vocab_names: None,
     }
 }
 
 #[test]
 fn anb_n_is_deterministic() {
     let m = anb_n_dpda();
-    assert!(m.is_deterministic(), "the a^n b^n DPDA must be deterministic");
+    assert!(
+        m.is_deterministic(),
+        "the a^n b^n DPDA must be deterministic"
+    );
 }
 
 #[test]
@@ -81,21 +115,33 @@ fn rtn_compilation_state_count_and_language() {
         vec![
             (0, vec![1, 0, 2]), // S -> a S b
             (0, vec![2, 0, 1]), // S -> b S a
-            (0, vec![3]), // S -> c
+            (0, vec![3]),       // S -> c
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile");
     // the kappa(G) = 1 + 2*1 + (3+1) + (3+1) + (1+1) = 13
     assert_eq!(kappa(&g), 13, "the kappa(G) must match the Definition 10");
-    assert_eq!(m.num_states, 13, "the compiled state count must equal kappa(G)");
+    assert_eq!(
+        m.num_states, 13,
+        "the compiled state count must equal kappa(G)"
+    );
     // the RTN compilation is an NPDA (the choice is non-deterministic)
-    assert!(!m.is_deterministic(), "the RTN compilation has a non-deterministic choice");
+    assert!(
+        !m.is_deterministic(),
+        "the RTN compilation has a non-deterministic choice"
+    );
     // the language: use a bounded grammar (the no recursion) for the accepts check
     let g2 = Cfg::new(1, 3, 0, vec![(0, vec![3])]); // S -> c (the c = the global ID 3)
     let m2 = pushdown_rs::compile(&g2).expect("compile");
     // the c input ID for the c (the global 3) = 3 - 1 = 2
-    assert!(m2.accepts_npda(&[2], 32, 100_000), "the NPDA accepts c (the S -> c)");
-    assert!(!m2.accepts_npda(&[0], 32, 100_000), "the NPDA rejects a (the no S -> a)");
+    assert!(
+        m2.accepts_npda(&[2], 32, 100_000),
+        "the NPDA accepts c (the S -> c)"
+    );
+    assert!(
+        !m2.accepts_npda(&[0], 32, 100_000),
+        "the NPDA rejects a (the no S -> a)"
+    );
 }
 
 // The RTN state -> nonterminal projection (the `state_provenance` primitive).
@@ -120,9 +166,21 @@ fn assert_provenance_oracle(g: &Cfg, m: &PdaMachine) {
     // (exclusive) the four family index-ranges are contiguous + disjoint + cover
     // [0, num_states): start=[0], entry=[1,num_nt], exit=[num_nt+1,2*num_nt],
     // dot=[2*num_nt+1, num_states). The kappa count is sum_p(|rhs(p)|+1).
-    let total_dots: u32 = g.productions.iter().map(|(_, rhs)| rhs.len() as u32 + 1).sum();
-    assert_eq!(m.num_states, dot_base + total_dots, "kappa(G) = 1 + 2|N| + sum(|rhs|+1)");
-    assert_eq!(kappa(g), m.num_states, "the kappa functional must agree with the compiled count");
+    let total_dots: u32 = g
+        .productions
+        .iter()
+        .map(|(_, rhs)| rhs.len() as u32 + 1)
+        .sum();
+    assert_eq!(
+        m.num_states,
+        dot_base + total_dots,
+        "kappa(G) = 1 + 2|N| + sum(|rhs|+1)"
+    );
+    assert_eq!(
+        kappa(g),
+        m.num_states,
+        "the kappa functional must agree with the compiled count"
+    );
 
     // Build the oracle with an EXACTLY-ONCE write check (the exclusive property:
     // no state is assigned by two families).
@@ -149,9 +207,18 @@ fn assert_provenance_oracle(g: &Cfg, m: &PdaMachine) {
         }
     }
     // (inclusive) every state assigned exactly once (total + no gap + no overlap).
-    assert_eq!(q as u32, m.num_states, "the dot family must end exactly at num_states (no gap)");
-    assert_eq!(writes, m.num_states, "each state written exactly once (disjoint + total)");
-    assert!(expected.iter().all(|e| e.is_some()), "no state left unassigned (inclusive)");
+    assert_eq!(
+        q as u32, m.num_states,
+        "the dot family must end exactly at num_states (no gap)"
+    );
+    assert_eq!(
+        writes, m.num_states,
+        "each state written exactly once (disjoint + total)"
+    );
+    assert!(
+        expected.iter().all(|e| e.is_some()),
+        "no state left unassigned (inclusive)"
+    );
     let expected: Vec<u32> = expected.into_iter().map(|e| e.unwrap()).collect();
 
     // (correct) the implementation matches the independent oracle.
@@ -162,7 +229,10 @@ fn assert_provenance_oracle(g: &Cfg, m: &PdaMachine) {
     );
     // (range) every entry is a valid nonterminal index.
     for &p in &expected {
-        assert!(p < num_nt, "provenance entry {p} must be a nonterminal index (< |N|)");
+        assert!(
+            p < num_nt,
+            "provenance entry {p} must be a nonterminal index (< |N|)"
+        );
     }
 }
 
@@ -181,7 +251,7 @@ fn assert_phase_homology(g: &Cfg, m: &PdaMachine) {
     let entry_hi = num_nt; // q_in range [1, num_nt]
     let exit_lo = 1 + num_nt;
     let exit_hi = 2 * num_nt; // q_out range [num_nt+1, 2*num_nt]
-    // dot_base = 2*num_nt + 1 (the first dot state); the dot range is [dot_base, num_states).
+                              // dot_base = 2*num_nt + 1 (the first dot state); the dot range is [dot_base, num_states).
     let prov = m.state_provenance.as_ref().expect("provenance");
     for t in &m.transitions {
         let q = t.q;
@@ -190,36 +260,75 @@ fn assert_phase_homology(g: &Cfg, m: &PdaMachine) {
             // START: q_start --eps--> q_S^in (the push is [bot]).
             assert!(is_eps, "the start move is an epsilon move");
             assert_eq!(t.next_q, 1 + g.start, "the start move enters q_S^in");
-            assert_eq!(prov[q as usize], prov[t.next_q as usize], "the start move preserves the phase (S)");
+            assert_eq!(
+                prov[q as usize], prov[t.next_q as usize],
+                "the start move preserves the phase (S)"
+            );
         } else if q <= entry_hi {
             // CHOICE: q_A^in --eps--> q_(p,0) (the push is [top]).
             assert!(is_eps, "the choice move is an epsilon move");
             assert!(t.next_q >= dot_base, "the choice move lands on a dot state");
-            assert_eq!(prov[q as usize], prov[t.next_q as usize], "the choice move preserves the phase (A == lhs(p))");
+            assert_eq!(
+                prov[q as usize], prov[t.next_q as usize],
+                "the choice move preserves the phase (A == lhs(p))"
+            );
         } else if q <= exit_hi {
             // RETURN: q_B^out --eps--> r (a dot) (the push is EMPTY).
             assert!(is_eps, "the return move is an epsilon move");
-            assert!(t.push.is_empty(), "the return move pops the return address (the empty push)");
+            assert!(
+                t.push.is_empty(),
+                "the return move pops the return address (the empty push)"
+            );
             assert!(t.next_q >= dot_base, "the return move lands on a dot state");
-            assert_eq!(prov[q as usize], q - exit_lo, "the return is out of q_B^out (the phase is B)");
+            assert_eq!(
+                prov[q as usize],
+                q - exit_lo,
+                "the return is out of q_B^out (the phase is B)"
+            );
             // the phase CHANGES from the callee B to the caller's lhs(p) (the dot).
         } else {
             // DOT state: either a terminal move, a call, or an exit.
             if !is_eps {
                 // TERMINAL: q_(p,i) --X--> q_(p,i+1) (the push is [top]).
-                assert!(q >= dot_base, "a terminal move occurs only at a dot state (the exclusive property)");
-                assert!(t.next_q >= dot_base, "a terminal move lands on the next dot");
-                assert_eq!(prov[q as usize], prov[t.next_q as usize], "a terminal move preserves the phase (the same production)");
+                assert!(
+                    q >= dot_base,
+                    "a terminal move occurs only at a dot state (the exclusive property)"
+                );
+                assert!(
+                    t.next_q >= dot_base,
+                    "a terminal move lands on the next dot"
+                );
+                assert_eq!(
+                    prov[q as usize], prov[t.next_q as usize],
+                    "a terminal move preserves the phase (the same production)"
+                );
             } else if t.push.len() == 2 {
                 // CALL: q_(p,i-1) --eps--> q_B^in (the push is [ret_addr, top]).
-                assert!(t.next_q >= entry_lo && t.next_q <= entry_hi, "the call target is an entry state");
-                assert_eq!(prov[t.next_q as usize], t.next_q - entry_lo, "the call enters the callee's phase (B)");
+                assert!(
+                    t.next_q >= entry_lo && t.next_q <= entry_hi,
+                    "the call target is an entry state"
+                );
+                assert_eq!(
+                    prov[t.next_q as usize],
+                    t.next_q - entry_lo,
+                    "the call enters the callee's phase (B)"
+                );
                 // the phase CHANGES from the caller's lhs(p) to the callee B.
             } else {
                 // EXIT: q_(p,m) --eps--> q_A^out (the push is [top]).
-                assert!(t.next_q >= exit_lo && t.next_q <= exit_hi, "the exit target is an exit state");
-                assert_eq!(t.next_q, exit_lo + prov[q as usize], "the exit move lands on q_out of the same nonterminal");
-                assert_eq!(prov[q as usize], prov[t.next_q as usize], "the exit move preserves the phase (lhs(p) == A)");
+                assert!(
+                    t.next_q >= exit_lo && t.next_q <= exit_hi,
+                    "the exit target is an exit state"
+                );
+                assert_eq!(
+                    t.next_q,
+                    exit_lo + prov[q as usize],
+                    "the exit move lands on q_out of the same nonterminal"
+                );
+                assert_eq!(
+                    prov[q as usize], prov[t.next_q as usize],
+                    "the exit move preserves the phase (lhs(p) == A)"
+                );
             }
         }
     }
@@ -234,10 +343,10 @@ fn rtn_state_provenance_inclusive_and_exclusive() {
         0, // start = S
         vec![
             (0, vec![3, 1, 4]), // S -> a A b
-            (0, vec![]), // S -> eps
-            (1, vec![2, 2]), // A -> B B
-            (1, vec![3]), // A -> a
-            (2, vec![4]), // B -> b
+            (0, vec![]),        // S -> eps
+            (1, vec![2, 2]),    // A -> B B
+            (1, vec![3]),       // A -> a
+            (2, vec![4]),       // B -> b
         ],
     );
     let m1 = pushdown_rs::compile(&g1).expect("compile");
@@ -251,7 +360,7 @@ fn rtn_state_provenance_inclusive_and_exclusive() {
         0,
         vec![
             (0, vec![1, 0, 2]), // S -> a S b
-            (0, vec![]), // S -> eps
+            (0, vec![]),        // S -> eps
         ],
     );
     let m2 = pushdown_rs::compile(&g2).expect("compile");
@@ -282,17 +391,26 @@ fn rtn_state_provenance_inclusive_and_exclusive() {
     // (5) the bitvec round-trip preserves the projection (the Some case).
     let bits = m1.to_bitvec();
     let m1r = PdaMachine::from_bitvec(&bits).expect("round-trip");
-    assert_eq!(m1r.state_provenance, m1.state_provenance, "the round-trip must be lossless");
+    assert_eq!(
+        m1r.state_provenance, m1.state_provenance,
+        "the round-trip must be lossless"
+    );
 }
 
 // A hand-built machine (the no RTN provenance) round-trips its `None` flag.
 #[test]
 fn hand_built_provenance_none_round_trips() {
     let m = anb_n_dpda();
-    assert!(m.state_provenance.is_none(), "the hand-built machine has no provenance");
+    assert!(
+        m.state_provenance.is_none(),
+        "the hand-built machine has no provenance"
+    );
     let bits = m.to_bitvec();
     let m2 = PdaMachine::from_bitvec(&bits).expect("the round-trip must deserialize");
-    assert!(m2.state_provenance.is_none(), "the None flag must survive the round-trip");
+    assert!(
+        m2.state_provenance.is_none(),
+        "the None flag must survive the round-trip"
+    );
 }
 
 #[test]
@@ -305,17 +423,29 @@ fn rtn_ambiguous_grammar_is_npda() {
         0,
         vec![
             (0, vec![1, 0, 2]), // S -> a S b
-            (0, vec![]), // S -> eps
+            (0, vec![]),        // S -> eps
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile");
-    assert!(!m.is_deterministic(), "the RTN compilation of an ambiguous grammar is an NPDA");
+    assert!(
+        !m.is_deterministic(),
+        "the RTN compilation of an ambiguous grammar is an NPDA"
+    );
     // the NPDA still accepts the language (the any-path)
     const A: u32 = 0; // the a (the local input ID)
     const B: u32 = 1; // the b (the local input ID)
-    assert!(m.accepts_npda(&[A, B], 64, 100_000), "the NPDA accepts ab (the n=1)");
-    assert!(m.accepts_npda(&[A, A, B, B], 64, 100_000), "the NPDA accepts aabb (the n=2)");
-    assert!(!m.accepts_npda(&[A, B, A], 64, 100_000), "the NPDA rejects aba (the unbalanced)");
+    assert!(
+        m.accepts_npda(&[A, B], 64, 100_000),
+        "the NPDA accepts ab (the n=1)"
+    );
+    assert!(
+        m.accepts_npda(&[A, A, B, B], 64, 100_000),
+        "the NPDA accepts aabb (the n=2)"
+    );
+    assert!(
+        !m.accepts_npda(&[A, B, A], 64, 100_000),
+        "the NPDA rejects aba (the unbalanced)"
+    );
 }
 
 // The no-unsafe proof: the crate source contains no `unsafe` block.
@@ -333,7 +463,12 @@ fn crate_is_unsafe_free() {
             for (i, line) in content.lines().enumerate() {
                 // the `unsafe` as a keyword (the no `unsafe fn`, the no `unsafe {`)
                 if line.trim_start().starts_with("unsafe ") || line.contains(" unsafe {") {
-                    found_unsafe.push(format!("{:?}:{}: {}", path.file_name().unwrap().to_string_lossy(), i + 1, line.trim()));
+                    found_unsafe.push(format!(
+                        "{:?}:{}: {}",
+                        path.file_name().unwrap().to_string_lossy(),
+                        i + 1,
+                        line.trim()
+                    ));
                 }
             }
         }
@@ -359,7 +494,10 @@ fn bitvec_rejects_truncated() {
     let bits = m.to_bitvec();
     let truncated = &bits[..bits.len() / 2];
     let res = PdaMachine::from_bitvec(truncated);
-    assert!(matches!(res, Err(BitvecError::Malformed(_))), "truncated bitvec must fail");
+    assert!(
+        matches!(res, Err(BitvecError::Malformed(_))),
+        "truncated bitvec must fail"
+    );
 }
 
 // The scaling benchmark: the {a^n b^n} DPDA on inputs of length 2, 4, ..., 200.
@@ -389,7 +527,10 @@ fn scaling_small_to_large_inputs() {
         for _ in 0..n {
             w.push(B);
         }
-        assert!(m.accepts_dpda(&w), "the DPDA accepts a^n b^n (n={n}, the large input)");
+        assert!(
+            m.accepts_dpda(&w),
+            "the DPDA accepts a^n b^n (n={n}, the large input)"
+        );
     }
     // the large unbalanced input (the n=100 a's, the n=99 b's)
     let mut w = Vec::with_capacity(199);
@@ -399,7 +540,10 @@ fn scaling_small_to_large_inputs() {
     for _ in 0..99 {
         w.push(B);
     }
-    assert!(!m.accepts_dpda(&w), "the DPDA rejects the unbalanced large input");
+    assert!(
+        !m.accepts_dpda(&w),
+        "the DPDA rejects the unbalanced large input"
+    );
 }
 
 // The bitvec POD size is EXACT (the header + the accepting + the transitions +
@@ -415,10 +559,14 @@ fn bitvec_size_is_exact() {
     let transitions: u32 = m.transitions.iter().map(|t| 5 + t.push.len() as u32).sum();
     let prov_suffix = match &m.state_provenance {
         Some(p) => 1 + p.len() as u32, // the flag + the num_states entries
-        None => 1, // the flag only
+        None => 1,                     // the flag only
     };
     let expected_u32 = header + accepting + transitions + prov_suffix;
-    assert_eq!(bits.len(), (expected_u32 * 32) as usize, "the bitvec size must be the exact POD formula");
+    assert_eq!(
+        bits.len(),
+        (expected_u32 * 32) as usize,
+        "the bitvec size must be the exact POD formula"
+    );
 }
 
 // The RTN compilation scaling: the kappa(G) = 1 + 2|N| + sum_p(|rhs(p)|+1).
@@ -432,17 +580,37 @@ fn rtn_compilation_scales_with_grammar() {
     let cases: Vec<(u32, u32, Vec<(u32, Vec<u32>)>)> = vec![
         (1, 2, vec![(0, vec![1, 0, 2]), (0, vec![])]), // the a^n b^n
         (2, 2, vec![(0, vec![1, 1, 2]), (1, vec![2]), (1, vec![])]),
-        (3, 1, vec![(0, vec![1]), (1, vec![1, 0]), (2, vec![1, 1, 0, 2])]),
-        (1, 3, vec![(0, vec![1]), (0, vec![2]), (0, vec![3]), (0, vec![])]),
+        (
+            3,
+            1,
+            vec![(0, vec![1]), (1, vec![1, 0]), (2, vec![1, 1, 0, 2])],
+        ),
+        (
+            1,
+            3,
+            vec![(0, vec![1]), (0, vec![2]), (0, vec![3]), (0, vec![])],
+        ),
     ];
     for (num_nt, num_tm, prods) in cases {
         let g = Cfg::new(num_nt, num_tm, 0, prods.clone());
         // the independent formula: 1 + 2|N| + sum_p(|rhs(p)|+1).
-        let expected: u32 = 1 + 2 * num_nt + prods.iter().map(|(_, rhs)| rhs.len() as u32 + 1).sum::<u32>();
-        assert_eq!(kappa(&g), expected, "the kappa must equal the independent formula (|N|={num_nt})");
+        let expected: u32 = 1
+            + 2 * num_nt
+            + prods
+                .iter()
+                .map(|(_, rhs)| rhs.len() as u32 + 1)
+                .sum::<u32>();
+        assert_eq!(
+            kappa(&g),
+            expected,
+            "the kappa must equal the independent formula (|N|={num_nt})"
+        );
         // the compiled machine must have exactly kappa states (the Lemma 2).
         let m = pushdown_rs::compile(&g).expect("compile");
-        assert_eq!(m.num_states, expected, "the compiled state count must equal kappa(G)");
+        assert_eq!(
+            m.num_states, expected,
+            "the compiled state count must equal kappa(G)"
+        );
     }
 }
 
@@ -460,23 +628,43 @@ fn proof_determinism_is_a_function() {
     // the deterministic machines (the no dup (q, a, top) key).
     let det_machines: Vec<PdaMachine> = vec![
         anb_n_dpda(), // the hand-built a^n b^n DPDA
-        pushdown_rs::compile(&Cfg::new(1, 2, 0, vec![(0, vec![1, 2])])).expect("the S -> a b (the single production)"),
+        pushdown_rs::compile(&Cfg::new(1, 2, 0, vec![(0, vec![1, 2])]))
+            .expect("the S -> a b (the single production)"),
     ];
     for m in &det_machines {
         assert!(m.is_deterministic(), "the machine must be deterministic");
-        let mut keys: Vec<(u32, u32, u32)> = m.transitions.iter().map(|t| (t.q, t.a, t.top)).collect();
+        let mut keys: Vec<(u32, u32, u32)> =
+            m.transitions.iter().map(|t| (t.q, t.a, t.top)).collect();
         keys.sort();
-        let dupes = keys.iter().zip(keys.iter().skip(1)).filter(|(a, b)| a == b).count();
-        assert_eq!(dupes, 0, "a deterministic machine has no duplicate (q, a, top) key");
+        let dupes = keys
+            .iter()
+            .zip(keys.iter().skip(1))
+            .filter(|(a, b)| a == b)
+            .count();
+        assert_eq!(
+            dupes, 0,
+            "a deterministic machine has no duplicate (q, a, top) key"
+        );
     }
     // the ambiguous machine (the HAS a dup key, the non-determinism is real).
     let amb = pushdown_rs::compile(&Cfg::new(1, 2, 0, vec![(0, vec![1, 0, 2]), (0, vec![])]))
         .expect("the S -> a S b | eps (the choice)");
-    assert!(!amb.is_deterministic(), "the ambiguous grammar must be non-deterministic");
-    let mut keys: Vec<(u32, u32, u32)> = amb.transitions.iter().map(|t| (t.q, t.a, t.top)).collect();
+    assert!(
+        !amb.is_deterministic(),
+        "the ambiguous grammar must be non-deterministic"
+    );
+    let mut keys: Vec<(u32, u32, u32)> =
+        amb.transitions.iter().map(|t| (t.q, t.a, t.top)).collect();
     keys.sort();
-    let dupes = keys.iter().zip(keys.iter().skip(1)).filter(|(a, b)| a == b).count();
-    assert!(dupes > 0, "the ambiguous machine must have a duplicate (q, a, top) key (the non-determinism)");
+    let dupes = keys
+        .iter()
+        .zip(keys.iter().skip(1))
+        .filter(|(a, b)| a == b)
+        .count();
+    assert!(
+        dupes > 0,
+        "the ambiguous machine must have a duplicate (q, a, top) key (the non-determinism)"
+    );
 }
 
 // PROOF 2: the Bounded stack (the Reach_H depth <= D, the per-step push bound).
@@ -493,14 +681,28 @@ fn proof_stack_is_bounded() {
     // (inclusive) every reachable config has stack depth <= d.
     let mut max_depth = 0usize;
     for (_, stack) in summary.reachable.iter() {
-        assert!(stack.len() <= d, "a reachable config must respect the stack bound d");
+        assert!(
+            stack.len() <= d,
+            "a reachable config must respect the stack bound d"
+        );
         max_depth = max_depth.max(stack.len());
     }
     // (exclusive) the bound is real: the a^n b^n nests to a non-trivial depth
     // (the [A_SYM, Z] after the first 'a'), and the per-step push is bounded.
-    assert!(max_depth >= 2, "the a^n b^n must reach a non-trivial nesting depth");
-    let max_push = m.transitions.iter().map(|t| t.push.len()).max().unwrap_or(0);
-    assert!(max_push <= 2, "the per-step push is bounded (the at most 2 symbols)");
+    assert!(
+        max_depth >= 2,
+        "the a^n b^n must reach a non-trivial nesting depth"
+    );
+    let max_push = m
+        .transitions
+        .iter()
+        .map(|t| t.push.len())
+        .max()
+        .unwrap_or(0);
+    assert!(
+        max_push <= 2,
+        "the per-step push is bounded (the at most 2 symbols)"
+    );
 }
 
 // PROOF 3: the Mask fidelity (the PSC classifier == the machine's legal inputs).
@@ -552,7 +754,11 @@ fn proof_projection_equals_sequential() {
     // mask_batch), and STOP at the first divergent token (the no transition) - the
     // projection's contract. Built from `lookup` + `mask_batch` (the primitives),
     // NOT from `project_batch`, so it is a genuine oracle.
-    fn sequential_projection(m: &PdaMachine, config: (u32, Vec<u32>), draft: &[u32]) -> Vec<Vec<u32>> {
+    fn sequential_projection(
+        m: &PdaMachine,
+        config: (u32, Vec<u32>),
+        draft: &[u32],
+    ) -> Vec<Vec<u32>> {
         use pushdown_rs::pda::PdaStream;
         let mut masks = vec![m.mask_batch(&[config.clone()])[0].clone()];
         let mut q = config.0;
@@ -577,16 +783,30 @@ fn proof_projection_equals_sequential() {
     // the fully-legal draft (the a a b b, the n=2): no divergence, K+1 masks.
     let legal_draft = vec![0u32, 0, 1, 1];
     let projected = m.project_batch(&[config.clone()], &[legal_draft.clone()]);
-    assert_eq!(projected[0], sequential_projection(&m, config.clone(), &legal_draft), "the legal projection must equal the K sequential steps");
-    assert_eq!(projected[0].len(), legal_draft.len() + 1, "the legal draft emits K+1 masks (the inclusive)");
+    assert_eq!(
+        projected[0],
+        sequential_projection(&m, config.clone(), &legal_draft),
+        "the legal projection must equal the K sequential steps"
+    );
+    assert_eq!(
+        projected[0].len(),
+        legal_draft.len() + 1,
+        "the legal draft emits K+1 masks (the inclusive)"
+    );
 
     // the divergent draft (the a b b a: the trailing tokens dead-end at state 2):
     // the projection STOPS at the first illegal token (the exclusive).).
     let illegal_draft = vec![0u32, 1, 1, 0];
     let projected2 = m.project_batch(&[config.clone()], &[illegal_draft.clone()]);
     let expected2 = sequential_projection(&m, config.clone(), &illegal_draft);
-    assert_eq!(projected2[0], expected2, "the divergent projection must stop at the first illegal token");
-    assert!(projected2[0].len() < illegal_draft.len() + 1, "the divergent draft emits FEWER than K+1 masks (the exclusive stop)");
+    assert_eq!(
+        projected2[0], expected2,
+        "the divergent projection must stop at the first illegal token"
+    );
+    assert!(
+        projected2[0].len() < illegal_draft.len() + 1,
+        "the divergent draft emits FEWER than K+1 masks (the exclusive stop)"
+    );
 }
 
 // PROOF 5: the Bitvec round-trip (the lossless serialization).
@@ -637,15 +857,24 @@ fn proof_bounded_summary() {
     let h = 8;
     let summary = BoundedSummary::compute(&m, h);
     // (inclusive) the start config is reachable and has a finite d_H.
-    assert!(summary.is_reachable(m.start_state, &[m.start_stack]), "the start is reachable");
-    assert!(summary.distance(m.start_state, &[m.start_stack]).is_some(), "the start has a finite d_H");
+    assert!(
+        summary.is_reachable(m.start_state, &[m.start_stack]),
+        "the start is reachable"
+    );
+    assert!(
+        summary.distance(m.start_state, &[m.start_stack]).is_some(),
+        "the start has a finite d_H"
+    );
     // (exclusive) every reachable config respects the depth bound h.
     for (_, stack) in summary.reachable.iter() {
         assert!(stack.len() <= h, "a reachable config must have depth <= h");
     }
     // (inclusive) every config with a defined d_H is in the Reach_H set.
     for (q, stack) in summary.distance.keys() {
-        assert!(summary.is_reachable(*q, stack), "a d_H-defined config must be reachable");
+        assert!(
+            summary.is_reachable(*q, stack),
+            "a d_H-defined config must be reachable"
+        );
     }
 }
 
@@ -684,13 +913,21 @@ fn proof_token_spanner() {
         type LState = u8;
         type Terminal = u8;
         fn transition(&self, s: u8, b: u8) -> u8 {
-            if s == 0 && b == b'a' { 1 } else { 255 } // the dead
+            if s == 0 && b == b'a' {
+                1
+            } else {
+                255
+            } // the dead
         }
         fn is_dead(&self, s: u8) -> bool {
             s == 255
         }
         fn accepting(&self, s: u8) -> Vec<u8> {
-            if s == 1 { vec![1] } else { vec![] }
+            if s == 1 {
+                vec![1]
+            } else {
+                vec![]
+            }
         }
         fn initial(&self) -> u8 {
             0
@@ -750,7 +987,9 @@ fn ab_corpus(max_len: usize) -> Vec<Vec<u32>> {
     let mut corpus = Vec::new();
     for len in 0..=max_len {
         for mask in 0..(1usize << len) {
-            let w: Vec<u32> = (0..len).map(|i| if (mask >> i) & 1 == 1 { 2 } else { 1 }).collect();
+            let w: Vec<u32> = (0..len)
+                .map(|i| if (mask >> i) & 1 == 1 { 2 } else { 1 })
+                .collect();
             corpus.push(w);
         }
     }
@@ -789,10 +1028,18 @@ fn run_differential(m: &PdaMachine, g: &Cfg, corpus: &[Vec<u32>]) {
         let oracle_says = cfg_accepts(g, w); // the oracle uses the global IDs
         if pda_says != oracle_says {
             disagreements += 1;
-            eprintln!("DISAGREE on global={:?} local={:?}: pda={} oracle={}", w, pda_input, pda_says, oracle_says);
+            eprintln!(
+                "DISAGREE on global={:?} local={:?}: pda={} oracle={}",
+                w, pda_input, pda_says, oracle_says
+            );
         }
     }
-    assert_eq!(disagreements, 0, "the PDA must match the independent oracle on all {} inputs", corpus.len());
+    assert_eq!(
+        disagreements,
+        0,
+        "the PDA must match the independent oracle on all {} inputs",
+        corpus.len()
+    );
 }
 
 #[test]
@@ -804,7 +1051,7 @@ fn differential_anb_n_pda_matches_independent_oracle() {
         0,
         vec![
             (0, vec![1, 0, 2]), // S -> a S b
-            (0, vec![]), // S -> eps
+            (0, vec![]),        // S -> eps
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile");
@@ -817,13 +1064,23 @@ fn differential_anb_n_pda_matches_independent_oracle() {
     // superset). In the full corpus (all binary strings of length 0..=12), the
     // accepted strings are precisely a^n b^n with 2n <= 12, i.e. n = 0..=6 (the 7).
     let accepted: Vec<_> = full.iter().filter(|w| cfg_accepts(&g, w)).collect();
-    assert_eq!(accepted.len(), 7, "the a^n b^n language accepts EXACTLY 7 strings of length <= 12 (the n=0..=6)");
+    assert_eq!(
+        accepted.len(),
+        7,
+        "the a^n b^n language accepts EXACTLY 7 strings of length <= 12 (the n=0..=6)"
+    );
     for w in &accepted {
         // each accepted string is a^n b^n (the a's then the b's, the equal count).
         let na = w.iter().filter(|&&x| x == 1).count();
         let nb = w.iter().filter(|&&x| x == 2).count();
-        assert_eq!(na, nb, "an accepted string must be a^n b^n (the equal count)");
-        assert!(w.iter().take_while(|&&x| x == 1).count() == na, "the a's must precede the b's");
+        assert_eq!(
+            na, nb,
+            "an accepted string must be a^n b^n (the equal count)"
+        );
+        assert!(
+            w.iter().take_while(|&&x| x == 1).count() == na,
+            "the a's must precede the b's"
+        );
     }
 }
 
@@ -837,7 +1094,7 @@ fn differential_balanced_parens_pda_matches_independent_oracle() {
         0,
         vec![
             (0, vec![1, 0, 2, 0]), // S -> ( S ) S
-            (0, vec![]), // S -> eps
+            (0, vec![]),           // S -> eps
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile");
@@ -855,7 +1112,7 @@ fn differential_balanced_parens_pda_matches_independent_oracle() {
 fn differential_multi_nonterminal_pda_matches_independent_oracle() {
     // N = {S=0, A=1, B=2}, Sigma = {a=3, b=4}.
     //   S -> a A b | eps
-    //   A -> B B | a 
+    //   A -> B B | a
     //   B -> b
     let g = Cfg::new(
         3,
@@ -863,10 +1120,10 @@ fn differential_multi_nonterminal_pda_matches_independent_oracle() {
         0,
         vec![
             (0, vec![3, 1, 4]), // S -> a A b
-            (0, vec![]), // S -> eps
-            (1, vec![2, 2]), // A -> B B
-            (1, vec![3]), // A -> a
-            (2, vec![4]), // B -> b
+            (0, vec![]),        // S -> eps
+            (1, vec![2, 2]),    // A -> B B
+            (1, vec![3]),       // A -> a
+            (2, vec![4]),       // B -> b
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile");
@@ -874,7 +1131,9 @@ fn differential_multi_nonterminal_pda_matches_independent_oracle() {
     let corpus: Vec<Vec<u32>> = (0..=8)
         .flat_map(|len| {
             (0..(1usize << len)).map(move |mask| {
-                (0..len).map(|i| if (mask >> i) & 1 == 1 { 4 } else { 3 }).collect::<Vec<u32>>()
+                (0..len)
+                    .map(|i| if (mask >> i) & 1 == 1 { 4 } else { 3 })
+                    .collect::<Vec<u32>>()
             })
         })
         .collect();
@@ -898,14 +1157,17 @@ fn epsilon_closure_advance_through_call() {
         0,
         vec![
             (0, vec![2, 1, 3]), // S -> a A b
-            (1, vec![4]), // A -> c
+            (1, vec![4]),       // A -> c
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile");
     // the local terminal IDs (the global - the num_nt=2): a=0, b=1, c=2.
     // the input "a c b" = the local [0, 2, 1].
     let local = vec![0u32, 2, 1];
-    assert!(m.accepts(&local), "the PDA accepts a c b (the S -> a A b, A -> c)");
+    assert!(
+        m.accepts(&local),
+        "the PDA accepts a c b (the S -> a A b, A -> c)"
+    );
     // the differential: the independent cfg oracle agrees (the global IDs).
     let global = vec![2u32, 4, 3]; // the a, c, b (the global)
     assert_eq!(
@@ -921,7 +1183,9 @@ fn epsilon_closure_advance_through_call() {
     // the full language membership (the reaching via the epsilon exit).
     let mut config = (m.start_state, vec![m.start_stack]);
     for &tok in &local {
-        config = m.advance_eps(config.0, &config.1, tok).expect("the advance must succeed (the no stuck call dot)");
+        config = m
+            .advance_eps(config.0, &config.1, tok)
+            .expect("the advance must succeed (the no stuck call dot)");
     }
     // the post-consumption config is at the last dot of S (the dot(S,3)); the
     // accepting state q_S^out is reached via the epsilon exit (the no input).
@@ -947,7 +1211,10 @@ fn epsilon_closure_advance_through_call() {
             frontier.push((q2, ns));
         }
     }
-    assert!(reached_accepting, "the epsilon closure from the post-consumption config reaches the accepting state");
+    assert!(
+        reached_accepting,
+        "the epsilon closure from the post-consumption config reaches the accepting state"
+    );
 }
 
 // PROOF 10: the SWYB soundness (the d_H upper-bound property, the inclusive + exclusive).
@@ -969,11 +1236,18 @@ fn proof_swyb_soundness() {
     // (exclusive) every accepting config has d_H = 0 (unconditional, not skipped).
     for (q, stack) in summary.reachable.iter() {
         if m.accepting.contains(q) {
-            assert_eq!(summary.distance(*q, stack), Some(0), "an accepting config must have d_H = 0");
+            assert_eq!(
+                summary.distance(*q, stack),
+                Some(0),
+                "an accepting config must have d_H = 0"
+            );
         }
     }
     // the start config reaches acceptance within h (the grammar terminates).
-    assert!(summary.distance(m.start_state, &[m.start_stack]).is_some(), "the start must have a finite d_H");
+    assert!(
+        summary.distance(m.start_state, &[m.start_stack]).is_some(),
+        "the start must have a finite d_H"
+    );
 }
 
 // PROOF 11: the batch invariant (the step_batch == the scalar step).
@@ -984,7 +1258,7 @@ fn proof_stream_step_batch_equals_scalar() {
     let m = anb_n_dpda();
     // the batch of (config, token) pairs (the batch)
     let batch: Vec<((u32, Vec<u32>), u32)> = vec![
-        ((0, vec![0]), 0), // the start, the 'a'
+        ((0, vec![0]), 0),    // the start, the 'a'
         ((1, vec![0, 1]), 0), // the after the 'a', the 'a'
         ((1, vec![0, 1]), 1), // the after the 'a', the 'b'
     ];
@@ -1004,7 +1278,10 @@ fn proof_stream_step_batch_equals_scalar() {
             }
             _ => (*q, stk.clone()),
         };
-        assert_eq!(batched[i], expected, "the step_batch[{i}] must equal the scalar step");
+        assert_eq!(
+            batched[i], expected,
+            "the step_batch[{i}] must equal the scalar step"
+        );
     }
 }
 
@@ -1021,20 +1298,32 @@ fn nondeterministic_regex_uses_npda_accepts() {
         0,
         vec![
             (0, vec![1, 0]), // S -> a S
-            (0, vec![1]), // S -> a
+            (0, vec![1]),    // S -> a
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile");
-    assert!(!m.is_deterministic(), "the [a-z]+ is non-deterministic (the choice)");
+    assert!(
+        !m.is_deterministic(),
+        "the [a-z]+ is non-deterministic (the choice)"
+    );
     // the PDA's input is the LOCAL terminal ID (the a=0, the b=1); the oracle
     // uses the GLOBAL (the a=1, the b=2). Map global -> local (the - num_nt).
     let to_local = |w: &[u32]| w.iter().map(|&x| x - 1).collect::<Vec<u32>>();
     // the single 'a' (the global [1] = the local [0]) is in the language (the S -> a)
     // the universal `accepts` auto-selects the NPDA (the non-deterministic) -
     // the caller does NOT need to know which variant the machine is.
-    assert!(m.accepts(&to_local(&[1])), "the [a-z]+ accepts a single 'a' (the accepts)");
-    assert!(m.accepts(&to_local(&[1, 1])), "the [a-z]+ accepts 'aa' (the universal accepts)");
-    assert!(!m.accepts(&to_local(&[])), "the [a-z]+ rejects the empty (the one-or-more)");
+    assert!(
+        m.accepts(&to_local(&[1])),
+        "the [a-z]+ accepts a single 'a' (the accepts)"
+    );
+    assert!(
+        m.accepts(&to_local(&[1, 1])),
+        "the [a-z]+ accepts 'aa' (the universal accepts)"
+    );
+    assert!(
+        !m.accepts(&to_local(&[])),
+        "the [a-z]+ rejects the empty (the one-or-more)"
+    );
 }
 
 // PROOF 12: the SIMD service (the device model, the batch in / batch out).
@@ -1048,8 +1337,8 @@ fn proof_simd_service_device_model() {
     // the step (the batch node 2 (step)): the batch of (config, token) -> the batch of next-config
     let batch = vec![
         (0u32, vec![0u32], 0u32), // the start, the 'a'
-        (1, vec![0, 1], 0), // the after the 'a', the 'a'
-        (1, vec![0, 1], 1), // the after the 'a', the 'b'
+        (1, vec![0, 1], 0),       // the after the 'a', the 'a'
+        (1, vec![0, 1], 1),       // the after the 'a', the 'b'
     ];
     let stepped = service.step(&batch);
     assert_eq!(stepped.len(), 3, "the batch size is preserved");
@@ -1073,7 +1362,7 @@ fn proof_step_batch_into_no_alloc() {
     let m = anb_n_dpda();
     let index = m.build_index();
     let batch: Vec<(u32, Vec<u32>, u32)> = vec![
-        (0, vec![0], 0), // the start, the 'a'
+        (0, vec![0], 0),    // the start, the 'a'
         (1, vec![0, 1], 0), // the after the 'a', the 'a'
         (1, vec![0, 1], 1), // the after the 'a', the 'b'
     ];
@@ -1081,10 +1370,15 @@ fn proof_step_batch_into_no_alloc() {
     let mut out: Vec<(u32, Vec<u32>)> = vec![(0, vec![0]); batch.len()];
     m.step_batch_into(&index, &batch, &mut out);
     // the reference (the step_batch, the per-item)
-    let ref_batch: Vec<((u32, Vec<u32>), u32)> =
-        batch.iter().map(|(q, s, a)| ((*q, s.clone()), *a)).collect();
+    let ref_batch: Vec<((u32, Vec<u32>), u32)> = batch
+        .iter()
+        .map(|(q, s, a)| ((*q, s.clone()), *a))
+        .collect();
     let ref_out = m.step_batch(&ref_batch);
-    assert_eq!(out, ref_out, "the step_batch_into must equal the step_batch (the batch invariant)");
+    assert_eq!(
+        out, ref_out,
+        "the step_batch_into must equal the step_batch (the batch invariant)"
+    );
 }
 
 // PROOF 14: the SIMD batched step (the batch node 2 (step), the B states in vectors).
@@ -1106,7 +1400,10 @@ fn proof_step_batch_simd() {
         .collect();
     let ref_out = m.step_batch(&ref_batch);
     let ref_states: Vec<u16> = ref_out.iter().map(|(q, _)| *q as u16).collect();
-    assert_eq!(simd_out, ref_states, "the step_batch_simd must equal the step_batch (the batch invariant)");
+    assert_eq!(
+        simd_out, ref_states,
+        "the step_batch_simd must equal the step_batch (the batch invariant)"
+    );
 }
 
 // PROOF 15: the SIMD batched projection (the batch node 3 (project), the B configs x
@@ -1122,7 +1419,10 @@ fn proof_project_batch_simd() {
     let drafts = vec![vec![0u32, 1], vec![0, 0, 1, 1]];
     let simd_out = m.project_batch_simd(&index, &configs, &drafts);
     let ref_out = m.project_batch(&configs, &drafts);
-    assert_eq!(simd_out, ref_out, "the project_batch_simd must equal the project_batch (the batch invariant)");
+    assert_eq!(
+        simd_out, ref_out,
+        "the project_batch_simd must equal the project_batch (the batch invariant)"
+    );
 }
 
 // PROOF 16: the CUDA graph (the DAG structure + the mock replay).
@@ -1141,8 +1441,58 @@ fn proof_cuda_graph_dag_and_replay() {
     assert!(!final_state.is_empty(), "the replay produces a state");
     // the drafting graph (the K+1 projection, the fixed unroll)
     let dg = PdaGraph::drafting(2, 16);
-    assert_eq!(dg.nodes.len(), 3, "the 3 nodes (the H2D, the ProjectMasks, the D2H)");
-    assert!(matches!(dg.nodes[1], GraphNode::ProjectMasks { batch: 2, k: 16 }));
-    assert!(dg.topo_order().is_some(), "the drafting graph is a valid DAG");
+    assert_eq!(
+        dg.nodes.len(),
+        3,
+        "the 3 nodes (the H2D, the ProjectMasks, the D2H)"
+    );
+    assert!(matches!(
+        dg.nodes[1],
+        GraphNode::ProjectMasks { batch: 2, k: 16 }
+    ));
+    assert!(
+        dg.topo_order().is_some(),
+        "the drafting graph is a valid DAG"
+    );
     let _ = dg.mock_replay(&m).expect("the drafting mock replay");
+}
+
+// PROOF 17: the mask_at_cfg_settled is the precise inclusive + (the no
+// epsilon-closure union). For EVERY (q, top) config in the full config space,
+// mask_at_cfg_settled(q, top) reports EXACTLY the terminals with a defined
+// transition at (q, a, top) without following epsilon moves.
+//
+// The inclusive property: every terminal a with a defined transition (q, a, top)
+// is in in the mask.
+// The exclusive property: no terminal a WITHOUT a defined transition (q, a, top)
+// is in in the mask.
+//
+// This is the mask source for the PDA-as-mask-source architecture (the
+// no-approximation gate). The complement over the vocab is the precise exclusive
+// gate (the disallowed terminals).
+#[test]
+fn proof_mask_at_cfg_settled_is_precise() {
+    let m = anb_n_dpda();
+    for q in 0..m.num_states {
+        for top in 0..m.num_stack_syms {
+            // the independent oracle: the terminals with a defined transition at (q, a, top).
+            let legal: Vec<u32> = (0..m.num_inputs)
+                .filter(|&a| !m.lookup(q, Some(a), top).is_empty())
+                .collect();
+            // the mask_at_cfg_settled (the precise inclusive gate).
+            let mask = m.mask_at_cfg_settled(q, top);
+            assert_eq!(
+                mask, legal,
+                "mask_at_cfg_settled must be EXACTLY the legal inputs (q={q}, top={top})"
+            );
+            // the exclusive gate: the complement over the vocab.
+            let excluded: Vec<u32> = (0..m.num_inputs)
+                .filter(|&a| m.lookup(q, Some(a), top).is_empty())
+                .collect();
+            assert!(
+                mask.iter().all(|&a| !excluded.contains(&a)),
+                "the mask must not include any excluded terminal (q={q}, top={top})"
+            );
+        }
+    }
 }

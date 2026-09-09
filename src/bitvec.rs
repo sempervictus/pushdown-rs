@@ -153,6 +153,9 @@ impl PdaMachine {
             start_state,
             start_stack,
             state_provenance,
+            // The bitvec (the H2D payload) does not carry the vocabulary names (the
+            // CPU-side concern); the consumer re-derives them from the grammar.
+            vocab_names: None,
         };
         m.validate_bounds().map_err(|e| BitvecError::Malformed(e.to_string()))?;
         Ok(m)

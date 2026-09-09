@@ -33,6 +33,11 @@ pub trait Grammar {
     fn is_terminal(&self, sym: &Self::Symbol) -> bool;
     /// the terminal ID for a symbol (the Sigma index), if it is a terminal.
     fn terminal_id(&self, sym: &Self::Symbol) -> Option<u32>;
+    /// The human-readable vocabulary label for a terminal (the consumer maps this to the
+    /// actual token / lexeme / character / protocol field). This is the PDA's
+    /// "vocabulary mapping interface": it lets an external caller identify which actual
+    /// lexeme is represented at which PDA input bit (the input ID = the terminal index).
+    fn terminal_name(&self, term: &Self::Terminal) -> String;
     /// the nonterminal ID for a symbol (the N index), if it is a nonterminal.
     fn nonterminal_id(&self, sym: &Self::Symbol) -> Option<u32>;
     /// the N index for a nonterminal (the lhs of a production).
@@ -256,6 +261,12 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
         start_state: Q_START,
         start_stack: 0,
         state_provenance: Some(state_provenance),
+        vocab_names: Some(
+            g.terminals()
+                .iter()
+                .map(|t| g.terminal_name(t))
+                .collect(),
+        ),
     })
 }
 
@@ -377,6 +388,12 @@ impl Grammar for Cfg {
         } else {
             None
         }
+    }
+    fn terminal_name(&self, sym: &u32) -> String {
+        // The concrete CFG has no human-readable labels; the terminal ID is the label.
+        // A consumer (the llguidance adapter, the regex, the protocol) overrides this
+        // with the actual vocabulary label (the token range, the character, the field).
+        format!("t{}", sym)
     }
     fn nonterminal_id(&self, sym: &u32) -> Option<u32> {
         if *sym < self.num_nonterminals {
