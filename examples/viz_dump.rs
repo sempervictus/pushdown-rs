@@ -8,7 +8,7 @@
 //!
 //! Run: `cargo run --example viz_dump` then open `viz/*.svg` in a browser.
 
-use pushdown_rs::compile::{Cfg, kappa, rtn_state_names};
+use pushdown_rs::compile::{Cfg, NamedCfg, kappa, rtn_state_names};
 use pushdown_rs::machine::{PdaMachine, Transition};
 use pushdown_rs::pda::{Dpda, Npda};
 use pushdown_rs::viz;
@@ -67,17 +67,24 @@ fn main() {
             (0, vec![]), // S -> eps
         ],
     );
-    let m_anb = pushdown_rs::compile(&g_anb).expect("compile a^n b^n");
-    let anb_states = rtn_state_names(&g_anb);
+    // The NamedCfg owns the vocabulary (the terminal_name -> a/b), so the
+    // compiled machine carries m.vocab_names and the viz reads the machine's
+    // own symbols (the no caller-side term array).
+    let g_anb_named = NamedCfg::new(g_anb, vec!["a", "b"].iter().map(|s| s.to_string()).collect());
+    let m_anb = pushdown_rs::compile(&g_anb_named).expect("compile a^n b^n");
+    let anb_states = rtn_state_names(&g_anb_named);
     dump_debug(&m_anb, "the {a^n b^n} DPDA", Some(&anb_states));
     println!(
         "  kappa(G) = {} (the exact control-state count)",
-        kappa(&g_anb)
+        kappa(&g_anb_named)
     );
     // A trace (the decompose the closure states). Local terminals: a=0, b=1.
     println!("  trace [0, 1] (the \"ab\", the a^n b^n with n=1):");
     m_anb.trace_npda(&[0, 1], 64);
-    let (svg, dot) = viz::dump_g(&g_anb, &m_anb, &["a", "b"], dir).expect("write a^n b^n");
+    let svg = dir.join("anbn.svg");
+    let dot = dir.join("anbn.dot");
+    viz::write_svg(&m_anb, Some(&anb_states), None, &svg).expect("write a^n b^n svg");
+    viz::write_dot(&m_anb, Some(&anb_states), None, &dot).expect("write a^n b^n dot");
     println!("  wrote: {}  +  {}", svg.display(), dot.display());
 
     // ---- 2. The balanced-parens Dyck language (the S -> ( S ) S | eps) ----
@@ -90,14 +97,21 @@ fn main() {
             (0, vec![]), // S -> eps
         ],
     );
-    let m_dyck = pushdown_rs::compile(&g_dyck).expect("compile dyck");
-    let dyck_states = rtn_state_names(&g_dyck);
+    // The NamedCfg owns the vocabulary (the terminal_name -> ( / )), so the
+    // compiled machine carries m.vocab_names and the viz reads the machine's
+    // own symbols (the no caller-side term array).
+    let g_dyck_named = NamedCfg::new(g_dyck, vec!["(", ")"].iter().map(|s| s.to_string()).collect());
+    let m_dyck = pushdown_rs::compile(&g_dyck_named).expect("compile dyck");
+    let dyck_states = rtn_state_names(&g_dyck_named);
     dump_debug(&m_dyck, "the balanced-parens (Dyck) DPDA", Some(&dyck_states));
     println!(
         "  kappa(G) = {} (the exact control-state count)",
-        kappa(&g_dyck)
+        kappa(&g_dyck_named)
     );
-    let (svg, dot) = viz::dump_g(&g_dyck, &m_dyck, &["(", ")"], dir).expect("write dyck");
+    let svg = dir.join("dyck.svg");
+    let dot = dir.join("dyck.dot");
+    viz::write_svg(&m_dyck, Some(&dyck_states), None, &svg).expect("write dyck svg");
+    viz::write_dot(&m_dyck, Some(&dyck_states), None, &dot).expect("write dyck dot");
     println!("  wrote: {}  +  {}", svg.display(), dot.display());
 
     // ---- 3. A hand-built DFA-embedded machine (the network-protocol idiom) ----

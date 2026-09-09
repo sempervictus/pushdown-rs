@@ -20,7 +20,7 @@
 //!
 //! Run: `cargo run --example sql_integration`.
 
-use pushdown_rs::compile::{Cfg, kappa, rtn_state_names};
+use pushdown_rs::compile::{Cfg, NamedCfg, kappa, rtn_state_names};
 use pushdown_rs::pda::{Dpda, Npda};
 use pushdown_rs::viz;
 
@@ -158,11 +158,15 @@ fn main() {
     println!("=== The SQL integration: the SQL-subset CFG + the recursive-descent oracle + the PDA ===\n");
 
     let g = sql_cfg();
-    let m = pushdown_rs::compile(&g).expect("compile the SQL CFG");
+    // The NamedCfg owns the vocabulary (the terminal_name -> the SQL keywords),
+    // so compile() populates m.vocab_names and the viz reads the machine's own
+    // symbols (the no caller-side TERM_NAMES duplication).
+    let named = NamedCfg::new(g, TERM_NAMES.iter().map(|s| s.to_string()).collect());
+    let m = pushdown_rs::compile(&named).expect("compile the SQL CFG");
     println!(
         "the PDA: {} states (kappa={}), {} transitions, deterministic={}",
         m.num_states,
-        kappa(&g),
+        kappa(&named),
         m.transitions.len(),
         m.is_deterministic()
     );
@@ -203,14 +207,15 @@ fn main() {
     println!("\n  {}/{} agree (the the 100% gate)", agree, corpus.len());
 
     // The viz dump (the the human-meaningful SVG reference, the the Task-1 viz).
-    let states = rtn_state_names(&g);
-    let terms: Vec<String> = TERM_NAMES.iter().map(|s| s.to_string()).collect();
+    // The term labels come from the machine's own vocab_names (the NamedCfg),
+    // so we pass None here.
+    let states = rtn_state_names(&named);
     let dir = std::path::Path::new("viz");
     std::fs::create_dir_all(dir).ok();
     let svg = dir.join("sql_subset.svg");
     let dot = dir.join("sql_subset.dot");
-    viz::write_svg(&m, Some(&states), Some(&terms), &svg).expect("write sql svg");
-    viz::write_dot(&m, Some(&states), Some(&terms), &dot).expect("write sql dot");
+    viz::write_svg(&m, Some(&states), None, &svg).expect("write sql svg");
+    viz::write_dot(&m, Some(&states), None, &dot).expect("write sql dot");
     println!("\n=== The viz dump ===");
     println!("  wrote: {}  +  {}", svg.display(), dot.display());
 }

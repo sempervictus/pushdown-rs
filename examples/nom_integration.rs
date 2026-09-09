@@ -11,24 +11,23 @@ use nom::multi::{many1, separated_list0};
 use nom::sequence::{delimited, separated_pair};
 use nom::IResult;
 
-use pushdown_rs::compile::Cfg;
+use pushdown_rs::compile::{Cfg, NamedCfg};
 use pushdown_rs::pda::{Dpda, Npda};
 
 use pushdown_rs::compile::rtn_state_names;
 use pushdown_rs::machine::PdaMachine;
 use pushdown_rs::viz;
 
-/// Write the viz dump (the SVG + the DOT) for a compiled PDA, pairing the RTN
-/// state names with the caller's terminal vocabulary.
-fn dump_viz(g: &Cfg, m: &PdaMachine, terms: &[&str], name: &str) {
-    let states = rtn_state_names(g);
-    let terms: Vec<String> = terms.iter().map(|s| s.to_string()).collect();
+/// Write the viz dump (the SVG + the DOT) for a compiled PDA. The terminal
+/// labels come from the machine's own vocab_names (the NamedCfg), so we pass
+/// None for the caller terms (the single source of truth).
+fn dump_viz(m: &PdaMachine, states: &[String], name: &str) {
     let dir = std::path::Path::new("viz");
     std::fs::create_dir_all(dir).ok();
     let svg = dir.join(format!("{name}.svg"));
     let dot = dir.join(format!("{name}.dot"));
-    viz::write_svg(m, Some(&states), Some(&terms), &svg).expect("write svg");
-    viz::write_dot(m, Some(&states), Some(&terms), &dot).expect("write dot");
+    viz::write_svg(m, Some(states), None, &svg).expect("write svg");
+    viz::write_dot(m, Some(states), None, &dot).expect("write dot");
     println!("\n=== The viz dump ({name}) ===");
     println!("  wrote: {}  +  {}", svg.display(), dot.display());
 }
@@ -169,7 +168,11 @@ fn main() {
     // the BER/TLV (the real pattern-match)
     println!("--- the BER/TLV (the ASN.1 encoding) ---");
     let ber_g = ber_tlv_cfg();
-    let ber_pda = pushdown_rs::compile(&ber_g).expect("compile");
+    let ber_named = NamedCfg::new(
+        ber_g,
+        vec!["tag", "len", "value"].iter().map(|s| s.to_string()).collect(),
+    );
+    let ber_pda = pushdown_rs::compile(&ber_named).expect("compile");
     println!(
         "  the PDA: {} states, {} transitions, deterministic={}",
         ber_pda.num_states,
@@ -203,12 +206,19 @@ fn main() {
             if nom_ok == *expect { "OK" } else { "NOM-MISMATCH" }
         );
     }
-    dump_viz(&ber_g, &ber_pda, &["tag", "len", "value"], "ber_tlv");
+    dump_viz(&ber_pda, &rtn_state_names(&ber_named), "ber_tlv");
 
     // the JSON (the real structure)
     println!("\n--- the JSON (the object structure) ---");
     let json_g = json_cfg();
-    let json_pda = pushdown_rs::compile(&json_g).expect("compile");
+    let json_named = NamedCfg::new(
+        json_g,
+        vec!["{", "}", ",", ":", "key", "value"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
+    let json_pda = pushdown_rs::compile(&json_named).expect("compile");
     println!(
         "  the PDA: {} states, {} transitions, deterministic={}",
         json_pda.num_states,
@@ -260,12 +270,16 @@ fn main() {
             if nom_ok == *expect { "OK" } else { "NOM-MISMATCH" }
         );
     }
-    dump_viz(&json_g, &json_pda, &["{", "}", ",", ":", "key", "value"], "json");
+    dump_viz(&json_pda, &rtn_state_names(&json_named), "json");
 
     // the regex (the [a-z]+)
     println!("\n--- the regex (the [a-z]+) ---");
     let regex_g = regex_cfg();
-    let regex_pda = pushdown_rs::compile(&regex_g).expect("compile");
+    let regex_named = NamedCfg::new(
+        regex_g,
+        vec!["a", "b"].iter().map(|s| s.to_string()).collect(),
+    );
+    let regex_pda = pushdown_rs::compile(&regex_named).expect("compile");
     println!(
         "  the PDA: {} states, {} transitions, deterministic={}",
         regex_pda.num_states,
@@ -287,5 +301,5 @@ fn main() {
             if nom_ok == *expect { "OK" } else { "NOM-MISMATCH" }
         );
     }
-    dump_viz(&regex_g, &regex_pda, &["a", "b"], "regex");
+    dump_viz(&regex_pda, &rtn_state_names(&regex_named), "regex");
 }

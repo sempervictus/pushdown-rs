@@ -5,22 +5,21 @@
 //! source (the CFG), and the deku struct is the oracle (the ground truth).
 
 use deku::prelude::*;
-use pushdown_rs::compile::{Cfg, rtn_state_names};
+use pushdown_rs::compile::{Cfg, NamedCfg, rtn_state_names};
 use pushdown_rs::machine::PdaMachine;
 use pushdown_rs::pda::{Dpda, Npda};
 use pushdown_rs::viz;
 
-/// Write the viz dump (the SVG + the DOT) for a compiled PDA, pairing the RTN
-/// state names with the caller's terminal vocabulary.
-fn dump_viz(g: &Cfg, m: &PdaMachine, terms: &[&str], name: &str) {
-    let states = rtn_state_names(g);
-    let terms: Vec<String> = terms.iter().map(|s| s.to_string()).collect();
+/// Write the viz dump (the SVG + the DOT) for a compiled PDA. The terminal
+/// labels come from the machine's own vocab_names (the NamedCfg), so we pass
+/// None for the caller terms (the single source of truth).
+fn dump_viz(m: &PdaMachine, states: &[String], name: &str) {
     let dir = std::path::Path::new("viz");
     std::fs::create_dir_all(dir).ok();
     let svg = dir.join(format!("{name}.svg"));
     let dot = dir.join(format!("{name}.dot"));
-    viz::write_svg(m, Some(&states), Some(&terms), &svg).expect("write svg");
-    viz::write_dot(m, Some(&states), Some(&terms), &dot).expect("write dot");
+    viz::write_svg(m, Some(states), None, &svg).expect("write svg");
+    viz::write_dot(m, Some(states), None, &dot).expect("write dot");
     println!("\n=== The viz dump ({name}) ===");
     println!("  wrote: {}  +  {}", svg.display(), dot.display());
 }
@@ -53,7 +52,14 @@ fn main() {
 
     // the PDA (the our code, the RTN compilation of the CFG)
     let g = fixed_tlv_cfg();
-    let pda = pushdown_rs::compile(&g).expect("compile");
+    // The NamedCfg owns the vocabulary (the terminal_name -> the TLV field
+    // labels), so compile() populates pda.vocab_names and the viz reads the
+    // machine's own symbols (the no caller-side duplication).
+    let named = NamedCfg::new(
+        g,
+        vec!["tag", "length", "value_byte"].iter().map(|s| s.to_string()).collect(),
+    );
+    let pda = pushdown_rs::compile(&named).expect("compile");
     println!(
         "the PDA: {} states, {} transitions, deterministic={}",
         pda.num_states,
@@ -83,5 +89,5 @@ fn main() {
             if deku_ok == *expect { "OK" } else { "DEKU-MISMATCH" }
         );
     }
-    dump_viz(&g, &pda, &["tag", "length", "value_byte"], "deku_fixedlv");
+    dump_viz(&pda, &rtn_state_names(&named), "deku_fixedlv");
 }
