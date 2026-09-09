@@ -2,9 +2,11 @@
 //!
 //! This module renders the control-state graph of a [`PdaMachine`] as a
 //! human-meaningful picture:
-//! - states are nodes (the start is ringed green, the accepting set is filled);
-//! - transitions are labeled edges (the input symbol + the stack op);
-//! - the layout is a left-to-right column flow (BFS depth from the start).
+//! - states are rounded-rectangle nodes (the start is ringed green, the
+//!   accepting set is filled blue);
+//! - transitions are curved, labeled edges (the input symbol + the stack op);
+//! - the layout is a left-to-right column flow (BFS depth from the start),
+//!   with each column vertically centered.
 //!
 //! It is a **view, not an execution tier**: it does not enter the
 //! scalar -> SIMD -> GPU identity chain (the AGENTS.md device-parity invariant),
@@ -12,7 +14,7 @@
 //! invariants are:
 //!   - one primary node per control state (the node count == `num_states`);
 //!   - one edge per transition (the edge count == `transitions.len()`);
-//!   - epsilon moves are dashed + red, terminal moves are solid + grey;
+//!   - epsilon moves are dashed + amber, terminal moves are solid + slate;
 //!   - the stack op is annotated (`pop` / `keep` / `push(k)`).
 //!
 //! Two emitters:
@@ -30,24 +32,28 @@ use crate::machine::{PdaMachine, Transition};
 use crate::pda::Dpda;
 
 // The layout constants (the pixels).
-const MARGIN: f64 = 64.0;
-const COL_W: f64 = 210.0;
-const ROW_H: f64 = 92.0;
-const NODE_R: f64 = 26.0;
-const FONT: f64 = 12.0;
+const MARGIN_X: f64 = 48.0;
+const MARGIN_TOP: f64 = 24.0;
+const HEADER_H: f64 = 64.0;
+const COL_W: f64 = 232.0;
+const ROW_H: f64 = 108.0;
+const NODE_W: f64 = 132.0;
+const NODE_H: f64 = 48.0;
+const FONT: f64 = 13.0;
 
-/// One node's screen position.
+/// One node's screen position (the center of the rounded rectangle).
 #[derive(Debug, Clone, Copy)]
 struct Pos {
     x: f64,
     y: f64,
 }
 
-/// Compute the column (BFS depth) of every state, then assign a (x, y).
+/// Compute the column (BFS depth) of every state, then assign a (x, y) center.
 ///
 /// Reachable states flow left -> right by depth; unreachable states are parked
 /// in a trailing column (the max reached depth + 1) so they are still drawn.
-/// Within a column, states are ordered by id (deterministic).
+/// Within a column, states are ordered by id (deterministic) and the column is
+/// vertically centered against the tallest column (the balanced look).
 fn layout(m: &PdaMachine) -> Vec<Pos> {
     let n = m.num_states as usize;
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -76,12 +82,15 @@ fn layout(m: &PdaMachine) -> Vec<Pos> {
     for (i, d) in depth.iter().enumerate() {
         cols.entry(*d).or_default().push(i);
     }
+    let max_rows = cols.values().map(|v| v.len()).max().unwrap_or(1);
     let mut pos = vec![Pos { x: 0.0, y: 0.0 }; n];
     for (col, members) in cols.iter() {
-        for (row, &sid) in members.iter().enumerate() {
+        let top_offset = (max_rows - members.len()) / 2;
+        for (i, &sid) in members.iter().enumerate() {
+            let row = top_offset + i;
             pos[sid] = Pos {
-                x: MARGIN + (*col as f64) * COL_W,
-                y: MARGIN + (row as f64) * ROW_H,
+                x: MARGIN_X + *col as f64 * COL_W + NODE_W / 2.0,
+                y: HEADER_H + MARGIN_TOP + row as f64 * ROW_H + NODE_H / 2.0,
             };
         }
     }
@@ -146,10 +155,10 @@ pub fn to_svg(
     let n = m.num_states as usize;
     let accepting: HashSet<u32> = m.accepting.iter().copied().collect();
 
-    let max_x = pos.iter().map(|p| p.x).fold(0.0, f64::max) + MARGIN + NODE_R + 40.0;
-    let max_y = pos.iter().map(|p| p.y).fold(0.0, f64::max) + MARGIN + NODE_R + 40.0;
+    let max_x = pos.iter().map(|p| p.x).fold(0.0, f64::max) + NODE_W / 2.0 + MARGIN_X;
+    let max_y = pos.iter().map(|p| p.y).fold(0.0, f64::max) + NODE_H / 2.0 + MARGIN_TOP + 30.0;
 
-    // Group parallel edges (the same (q, next_q)) so they fan out perpendicular.
+    // Group parallel edges (the same (q, next_q)) so they fan out vertically.
     let mut groups: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
     for (i, t) in m.transitions.iter().enumerate() {
         groups.entry((t.q as usize, t.next_q as usize)).or_default().push(i);
@@ -158,22 +167,26 @@ pub fn to_svg(
     let mut group_keys: Vec<(usize, usize)> = groups.keys().cloned().collect();
     group_keys.sort();
 
+    let det = m.is_deterministic();
     let mut s = String::new();
     s.push_str(&format!(
         r##"<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="{max_x:.0}" height="{max_y:.0}" viewBox="0 0 {max_x:.0} {max_y:.0}" font-family="monospace" font-size="{FONT:.0}">
+<svg xmlns="http://www.w3.org/2000/svg" width="{max_x:.0}" height="{max_y:.0}" viewBox="0 0 {max_x:.0} {max_y:.0}" font-family="'Inter','Segoe UI',system-ui,-apple-system,sans-serif">
   <title>PDA: {n} states, {t} transitions, deterministic={det}</title>
   <defs>
-    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#555"/></marker>
-    <marker id="arrE" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b34"/></marker>
+    <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#94a3b8"/></marker>
+    <marker id="arrE" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#f59e0b"/></marker>
   </defs>
-  <rect width="100%" height="100%" fill="white"/>
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="{mx}" y="30" font-size="17" font-weight="600" fill="#0f172a">PDA &#8212; {n} states &#183; {t} transitions &#183; deterministic={det}</text>
+  <text x="{mx}" y="48" font-size="11" fill="#64748b">solid slate = terminal move &#183; dashed amber = epsilon &#183; label = input / stack-op</text>
 "##,
         max_x = max_x,
         max_y = max_y,
         n = n,
         t = m.transitions.len(),
-        det = m.is_deterministic(),
+        det = det,
+        mx = MARGIN_X,
     ));
 
     // The edges (drawn first, under the nodes).
@@ -185,54 +198,65 @@ pub fn to_svg(
             let is_eps = t.a == m.num_inputs;
             let a = input_label(m, t.a, term_names);
             let op = stack_op_label(t);
-            let label = if is_eps {
-                format!("epsilon . {op}")
-            } else {
-                format!("{a} . {op}")
-            };
-            let color = if is_eps { "#b34" } else { "#555" };
+            let a_esc = xml_esc(&a);
+            let a_disp = if is_eps { "&#949;" } else { a_esc.as_str() };
+            let label = format!("{a_disp} &#183; {op}");
+            let color = if is_eps { "#f59e0b" } else { "#94a3b8" };
             let marker = if is_eps { "arrE" } else { "arr" };
-            let dash = if is_eps { r##" stroke-dasharray="5,4""## } else { "" };
+            let dash = if is_eps { r##" stroke-dasharray="6,4""## } else { "" };
 
             if self_loop {
                 let p = pos[*q];
                 let cx = p.x;
-                let cy = p.y - NODE_R - 16.0;
+                let top = p.y - NODE_H / 2.0;
                 s.push_str(&format!(
-                    r##"  <path d="M {cx:.1} {cy:.1} a 15 15 0 1 1 0.1 0" fill="none" stroke="{color}"{dash} marker-end="url(#{marker})"/>
-  <text x="{cx:.1}" y="{ty:.1}" fill="{color}" text-anchor="middle" font-size="10">{lab}</text>
+                    r##"  <path d="M {x1:.1} {y1:.1} C {c1x:.1} {c1y:.1}, {c2x:.1} {c2y:.1}, {x2:.1} {y2:.1}" fill="none" stroke="{color}" stroke-width="1.6"{dash} marker-end="url(#{marker})"/>
+  <text x="{lx:.1}" y="{ly:.1}" fill="{color}" font-size="10" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3">{lab}</text>
 "##,
-                    cx = cx,
-                    cy = cy,
+                    x1 = cx - 24.0,
+                    y1 = top,
+                    c1x = cx - 58.0,
+                    c1y = top - 46.0,
+                    c2x = cx + 58.0,
+                    c2y = top - 46.0,
+                    x2 = cx + 24.0,
+                    y2 = top,
                     color = color,
                     dash = dash,
                     marker = marker,
-                    ty = cy - 18.0,
-                    lab = xml_esc(&label),
+                    lx = cx,
+                    ly = top - 42.0,
+                    lab = label,
                 ));
             } else {
                 let p1 = pos[*q];
                 let p2 = pos[*nq];
-                let dx = p2.x - p1.x;
-                let dy = p2.y - p1.y;
-                let len = (dx * dx + dy * dy).sqrt().max(1.0);
-                let ux = dx / len;
-                let uy = dy / len;
-                let px = -uy;
-                let py = ux;
-                let off = (k as f64 - (idxs.len() as f64 - 1.0) / 2.0) * 9.0;
-                let sx = p1.x + ux * NODE_R + px * off;
-                let sy = p1.y + uy * NODE_R + py * off;
-                let ex = p2.x - ux * NODE_R + px * off;
-                let ey = p2.y - uy * NODE_R + py * off;
+                let forward = p2.x >= p1.x;
+                let sx = if forward {
+                    p1.x + NODE_W / 2.0
+                } else {
+                    p1.x - NODE_W / 2.0
+                };
+                let ex = if forward {
+                    p2.x - NODE_W / 2.0
+                } else {
+                    p2.x + NODE_W / 2.0
+                };
+                let off = (k as f64 - (idxs.len() as f64 - 1.0) / 2.0) * 14.0;
+                let sy = p1.y + off;
+                let ey = p2.y + off;
+                let c1x = sx + (ex - sx) * 0.5;
+                let c2x = sx + (ex - sx) * 0.5;
                 let mx = (sx + ex) / 2.0;
-                let my = (sy + ey) / 2.0 - 4.0;
+                let my = (sy + ey) / 2.0 - 6.0;
                 s.push_str(&format!(
-                    r##"  <line x1="{sx:.1}" y1="{sy:.1}" x2="{ex:.1}" y2="{ey:.1}" stroke="{color}" stroke-width="1.4"{dash} marker-end="url(#{marker})"/>
-  <text x="{mx:.1}" y="{my:.1}" fill="{color}" text-anchor="middle" font-size="10">{lab}</text>
+                    r##"  <path d="M {sx:.1} {sy:.1} C {c1x:.1} {sy:.1}, {c2x:.1} {ey:.1}, {ex:.1} {ey:.1}" fill="none" stroke="{color}" stroke-width="1.6"{dash} marker-end="url(#{marker})"/>
+  <text x="{mx:.1}" y="{my:.1}" fill="{color}" font-size="10" text-anchor="middle" paint-order="stroke" stroke="#ffffff" stroke-width="3">{lab}</text>
 "##,
                     sx = sx,
                     sy = sy,
+                    c1x = c1x,
+                    c2x = c2x,
                     ex = ex,
                     ey = ey,
                     color = color,
@@ -240,7 +264,7 @@ pub fn to_svg(
                     marker = marker,
                     mx = mx,
                     my = my,
-                    lab = xml_esc(&label),
+                    lab = label,
                 ));
             }
         }
@@ -250,38 +274,40 @@ pub fn to_svg(
     for (i, p) in pos.iter().enumerate() {
         let is_start = i == m.start_state as usize;
         let is_acc = accepting.contains(&(i as u32));
-        let fill = if is_acc { "#fde" } else { "#fff" };
-        let stroke = if is_start { "#0a0" } else { "#333" };
-        let sw = if is_start { "3" } else { "1.5" };
+        let (fill, stroke, sw) = if is_acc {
+            ("#eff6ff", "#3b82f6", "2.0")
+        } else {
+            ("#ffffff", "#cbd5e1", "1.5")
+        };
+        let (fill, stroke, sw) = if is_start {
+            ("#ecfdf5", "#10b981", "2.5")
+        } else {
+            (fill, stroke, sw)
+        };
+        let x = p.x - NODE_W / 2.0;
+        let y = p.y - NODE_H / 2.0;
         s.push_str(&format!(
-            r##"  <circle cx="{x:.1}" cy="{y:.1}" r="{r:.0}" fill="{fill}" stroke="{stroke}" stroke-width="{sw}"/>
+            r##"  <rect x="{x:.1}" y="{y:.1}" width="{w:.0}" height="{h:.0}" rx="10" ry="10" fill="{fill}" stroke="{stroke}" stroke-width="{sw}"/>
 "##,
-            x = p.x,
-            y = p.y,
-            r = NODE_R,
+            x = x,
+            y = y,
+            w = NODE_W,
+            h = NODE_H,
             fill = fill,
             stroke = stroke,
             sw = sw,
         ));
-        if is_start {
-            s.push_str(&format!(
-                r##"  <circle cx="{x:.1}" cy="{y:.1}" r="{r:.0}" fill="none" stroke="#0a0" stroke-width="1.5"/>
-"##,
-                x = p.x,
-                y = p.y,
-                r = NODE_R + 5.0,
-            ));
-        }
         let name = state_label(m, i as u32, state_names);
         s.push_str(&format!(
-            r##"  <text x="{x:.1}" y="{y:.1}" text-anchor="middle" fill="#111">{lab}</text>
+            r##"  <text x="{cx:.1}" y="{cy:.1}" text-anchor="middle" font-size="{fs:.0}" font-weight="500" fill="#1e293b">{lab}</text>
 "##,
-            x = p.x,
-            y = p.y + 4.0,
+            cx = p.x,
+            cy = p.y + 5.0,
+            fs = FONT,
             lab = xml_esc(&name),
         ));
         let tag = if is_start && is_acc {
-            "start+accept"
+            "start &#183; accept"
         } else if is_start {
             "start"
         } else if is_acc {
@@ -291,11 +317,11 @@ pub fn to_svg(
         };
         if !tag.is_empty() {
             s.push_str(&format!(
-                r##"  <text x="{x:.1}" y="{y:.1}" text-anchor="middle" fill="#666" font-size="9">{tag}</text>
+                r##"  <text x="{cx:.1}" y="{cy:.1}" text-anchor="middle" font-size="9" fill="#94a3b8" letter-spacing="0.5">{lab}</text>
 "##,
-                x = p.x,
-                y = p.y + NODE_R + 14.0,
-                tag = tag,
+                cx = p.x,
+                cy = p.y + NODE_H / 2.0 + 14.0,
+                lab = tag,
             ));
         }
     }
@@ -313,17 +339,22 @@ pub fn to_dot(
     term_names: Option<&[String]>,
 ) -> String {
     let accepting: HashSet<u32> = m.accepting.iter().copied().collect();
-    let mut s = String::from("digraph PDA {\n  node [shape=ellipse, fontname=monospace];\n");
+    let mut s = String::from(
+        "digraph PDA {\n  graph [rankdir=LR, splines=spline, nodesep=0.5, ranksep=0.9];\n  node [shape=box, style=rounded, fontname=\"Helvetica,Arial,sans-serif\", fontsize=12, fillcolor=white, color=#cbd5e1];\n",
+    );
     for i in 0..m.num_states {
         let name = state_label(m, i, state_names);
         let mut attrs: Vec<String> = Vec::new();
         if i == m.start_state {
-            attrs.push("color=green".to_string());
+            attrs.push("color=#10b981".to_string());
             attrs.push("penwidth=2".to_string());
+            attrs.push("fillcolor=#ecfdf5".to_string());
+            attrs.push("style=rounded,filled".to_string());
         }
         if accepting.contains(&i) {
-            attrs.push("fillcolor=lightgrey".to_string());
-            attrs.push("style=filled".to_string());
+            attrs.push("fillcolor=#eff6ff".to_string());
+            attrs.push("color=#3b82f6".to_string());
+            attrs.push("style=rounded,filled".to_string());
         }
         let attr = if attrs.is_empty() {
             String::new()
@@ -337,9 +368,9 @@ pub fn to_dot(
         let op = stack_op_label(t);
         let label = format!("{a} / {op}");
         let style = if t.a == m.num_inputs {
-            ", style=dashed, color=red"
+            ", style=dashed, color=#f59e0b"
         } else {
-            ""
+            ", color=#94a3b8"
         };
         s.push_str(&format!(
             "  \"{}\" -> \"{}\" [label=\"{}\"{}];\n",
@@ -432,9 +463,9 @@ mod tests {
         );
         // The edge invariant: one marker-end per transition.
         assert_eq!(svg.matches("marker-end=").count(), m.transitions.len());
-        // The node invariant: at least one primary circle per state (the start
-        // adds a second ring, so >= num_states).
-        assert!(svg.matches("<circle").count() >= m.num_states as usize);
+        // The node invariant: one rounded-rect per state (the background adds a
+        // second rect, so >= num_states).
+        assert!(svg.matches("<rect").count() >= m.num_states as usize);
         // The title carries the machine summary (the human-meaningful header).
         assert!(svg.contains(&format!("PDA: {} states", m.num_states)));
     }
