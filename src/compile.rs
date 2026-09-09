@@ -412,3 +412,68 @@ impl Grammar for Cfg {
         self.validate_cfg()
     }
 }
+
+/// A CFG wrapper with human-readable terminal labels (the vocabulary mapping interface).
+///
+/// Wraps a [`Cfg`] + a `Vec<String>` of terminal names (indexed by the LOCAL
+/// terminal id, `0..num_terminals`). Every `Grammar` method delegates to the
+/// inner CFG except [`terminal_name`](Grammar::terminal_name), which returns the
+/// caller label. `compile()` populates `PdaMachine.vocab_names` from this, so the
+/// machine owns its external vocabulary (the caller no longer re-supplies the
+/// labels to the viz / the consumers).
+#[derive(Debug, Clone)]
+pub struct NamedCfg {
+    pub cfg: Cfg,
+    /// The terminal labels, indexed by the LOCAL terminal id (0..num_terminals).
+    pub terminal_names: Vec<String>,
+}
+
+impl NamedCfg {
+    pub fn new(cfg: Cfg, terminal_names: Vec<String>) -> Self {
+        NamedCfg { cfg, terminal_names }
+    }
+}
+
+impl Grammar for NamedCfg {
+    type Nonterminal = u32;
+    type Terminal = u32;
+    type Symbol = u32;
+
+    fn nonterminals(&self) -> Vec<u32> {
+        self.cfg.nonterminals()
+    }
+    fn terminals(&self) -> Vec<u32> {
+        self.cfg.terminals()
+    }
+    fn start(&self) -> u32 {
+        self.cfg.start()
+    }
+    fn productions(&self) -> Vec<(u32, Vec<u32>)> {
+        self.cfg.productions()
+    }
+    fn is_terminal(&self, sym: &u32) -> bool {
+        self.cfg.is_terminal(sym)
+    }
+    fn terminal_id(&self, sym: &u32) -> Option<u32> {
+        self.cfg.terminal_id(sym)
+    }
+    fn terminal_name(&self, term: &u32) -> String {
+        // The LOCAL terminal id (0..num_terminals) indexes the names labels.
+        self.terminal_names
+            .get(*term as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("t{term}"))
+    }
+    fn nonterminal_id(&self, sym: &u32) -> Option<u32> {
+        self.cfg.nonterminal_id(sym)
+    }
+    fn nonterminal_index(&self, nt: &u32) -> u32 {
+        self.cfg.nonterminal_index(nt)
+    }
+    fn start_id(&self) -> u32 {
+        self.cfg.start_id()
+    }
+    fn validate(&self) -> Result<(), CfgError> {
+        self.cfg.validate()
+    }
+}

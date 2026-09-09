@@ -111,16 +111,23 @@ fn state_label(_m: &PdaMachine, id: u32, names: Option<&[String]>) -> String {
 }
 
 /// The input's label: `epsilon` for the epsilon move (a == num_inputs), else the
-/// caller-supplied terminal name if present, else the raw id.
+/// caller-supplied terminal name if present, else the machine's own vocabulary
+/// (the `vocab_names`, the CPU-side labels), else the raw id.
 fn input_label(m: &PdaMachine, a: u32, terms: Option<&[String]>) -> String {
     if a == m.num_inputs {
-        "epsilon".to_string()
-    } else {
-        match terms {
-            Some(t) if (a as usize) < t.len() => t[a as usize].clone(),
-            _ => format!("{a}"),
+        return "epsilon".to_string();
+    }
+    if let Some(t) = terms {
+        if (a as usize) < t.len() {
+            return t[a as usize].clone();
         }
     }
+    // Fall back to the machine's own vocabulary (the vocab_names, the
+    // terminal_name the grammar supplied). This is the single source of truth:
+    // a compiled machine renders its real symbols with no caller-side labels.
+    m.vocab_name(a)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{a}"))
 }
 
 /// The stack op of a transition: `pop` (empty push), `keep` (push == [top]),

@@ -106,7 +106,7 @@ pub use pda::{
     Pda, VisiblyPushdown,
 };
 pub use machine::{PdaError, PdaMachine, Transition};
-pub use compile::{Cfg, CfgError, Grammar, kappa};
+pub use compile::{Cfg, CfgError, Grammar, NamedCfg, kappa};
 pub use bitvec::BitvecError;
 
 /// Compile an abstract grammar to a PDA machine (the RTN construction).
