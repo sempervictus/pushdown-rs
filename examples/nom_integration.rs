@@ -14,6 +14,25 @@ use nom::IResult;
 use pushdown_rs::compile::Cfg;
 use pushdown_rs::pda::{Dpda, Npda};
 
+use pushdown_rs::compile::rtn_state_names;
+use pushdown_rs::machine::PdaMachine;
+use pushdown_rs::viz;
+
+/// Write the viz dump (the SVG + the DOT) for a compiled PDA, pairing the RTN
+/// state names with the caller's terminal vocabulary.
+fn dump_viz(g: &Cfg, m: &PdaMachine, terms: &[&str], name: &str) {
+    let states = rtn_state_names(g);
+    let terms: Vec<String> = terms.iter().map(|s| s.to_string()).collect();
+    let dir = std::path::Path::new("viz");
+    std::fs::create_dir_all(dir).ok();
+    let svg = dir.join(format!("{name}.svg"));
+    let dot = dir.join(format!("{name}.dot"));
+    viz::write_svg(m, Some(&states), Some(&terms), &svg).expect("write svg");
+    viz::write_dot(m, Some(&states), Some(&terms), &dot).expect("write dot");
+    println!("\n=== The viz dump ({name}) ===");
+    println!("  wrote: {}  +  {}", svg.display(), dot.display());
+}
+
 // ==================== the BER/TLV (the real pattern-match) ====================
 // the ASN.1 BER encoding: the tag (1 byte), the length (the short/long form),
 // the value (the length bytes).
@@ -149,7 +168,8 @@ fn main() {
 
     // the BER/TLV (the real pattern-match)
     println!("--- the BER/TLV (the ASN.1 encoding) ---");
-    let ber_pda = pushdown_rs::compile(&ber_tlv_cfg()).expect("compile");
+    let ber_g = ber_tlv_cfg();
+    let ber_pda = pushdown_rs::compile(&ber_g).expect("compile");
     println!(
         "  the PDA: {} states, {} transitions, deterministic={}",
         ber_pda.num_states,
@@ -183,10 +203,12 @@ fn main() {
             if nom_ok == *expect { "OK" } else { "NOM-MISMATCH" }
         );
     }
+    dump_viz(&ber_g, &ber_pda, &["tag", "len", "value"], "ber_tlv");
 
     // the JSON (the real structure)
     println!("\n--- the JSON (the object structure) ---");
-    let json_pda = pushdown_rs::compile(&json_cfg()).expect("compile");
+    let json_g = json_cfg();
+    let json_pda = pushdown_rs::compile(&json_g).expect("compile");
     println!(
         "  the PDA: {} states, {} transitions, deterministic={}",
         json_pda.num_states,
@@ -238,10 +260,12 @@ fn main() {
             if nom_ok == *expect { "OK" } else { "NOM-MISMATCH" }
         );
     }
+    dump_viz(&json_g, &json_pda, &["{", "}", ",", ":", "key", "value"], "json");
 
     // the regex (the [a-z]+)
     println!("\n--- the regex (the [a-z]+) ---");
-    let regex_pda = pushdown_rs::compile(&regex_cfg()).expect("compile");
+    let regex_g = regex_cfg();
+    let regex_pda = pushdown_rs::compile(&regex_g).expect("compile");
     println!(
         "  the PDA: {} states, {} transitions, deterministic={}",
         regex_pda.num_states,
@@ -263,4 +287,5 @@ fn main() {
             if nom_ok == *expect { "OK" } else { "NOM-MISMATCH" }
         );
     }
+    dump_viz(&regex_g, &regex_pda, &["a", "b"], "regex");
 }

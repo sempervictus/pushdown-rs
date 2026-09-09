@@ -5,8 +5,25 @@
 //! source (the CFG), and the deku struct is the oracle (the ground truth).
 
 use deku::prelude::*;
-use pushdown_rs::compile::Cfg;
+use pushdown_rs::compile::{Cfg, rtn_state_names};
+use pushdown_rs::machine::PdaMachine;
 use pushdown_rs::pda::{Dpda, Npda};
+use pushdown_rs::viz;
+
+/// Write the viz dump (the SVG + the DOT) for a compiled PDA, pairing the RTN
+/// state names with the caller's terminal vocabulary.
+fn dump_viz(g: &Cfg, m: &PdaMachine, terms: &[&str], name: &str) {
+    let states = rtn_state_names(g);
+    let terms: Vec<String> = terms.iter().map(|s| s.to_string()).collect();
+    let dir = std::path::Path::new("viz");
+    std::fs::create_dir_all(dir).ok();
+    let svg = dir.join(format!("{name}.svg"));
+    let dot = dir.join(format!("{name}.dot"));
+    viz::write_svg(m, Some(&states), Some(&terms), &svg).expect("write svg");
+    viz::write_dot(m, Some(&states), Some(&terms), &dot).expect("write dot");
+    println!("\n=== The viz dump ({name}) ===");
+    println!("  wrote: {}  +  {}", svg.display(), dot.display());
+}
 
 // the deku struct for the fixed-size TLV (the tag, the length, the value)
 #[derive(Debug, PartialEq, DekuRead)]
@@ -35,7 +52,8 @@ fn main() {
     println!("=== The deku integration: the FixedTlv + the CFG + the PDA ===\n");
 
     // the PDA (the our code, the RTN compilation of the CFG)
-    let pda = pushdown_rs::compile(&fixed_tlv_cfg()).expect("compile");
+    let g = fixed_tlv_cfg();
+    let pda = pushdown_rs::compile(&g).expect("compile");
     println!(
         "the PDA: {} states, {} transitions, deterministic={}",
         pda.num_states,
@@ -65,4 +83,5 @@ fn main() {
             if deku_ok == *expect { "OK" } else { "DEKU-MISMATCH" }
         );
     }
+    dump_viz(&g, &pda, &["tag", "length", "value_byte"], "deku_fixedlv");
 }
