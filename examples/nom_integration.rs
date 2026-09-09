@@ -6,8 +6,8 @@
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take};
-use nom::combinator::{opt, rest};
-use nom::multi::{many0, many1, separated_list0};
+use nom::combinator::rest;
+use nom::multi::{many1, separated_list0};
 use nom::sequence::{delimited, separated_pair};
 use nom::IResult;
 

@@ -55,3 +55,14 @@ from these sources; this crate is a faithful implementation, not an invention.
   quantities).
 
 These underlie the SWYB bounded summary (the summary.rs).
+
+## The application grammars (the the SQL + the eBPF examples)
+
+- The eBPF instruction set (the the Linux kernel eBPF, the the CALL/RET/OP/EXIT
+  classes): the the well-nested call/return subset is a DCFL (the the balanced-
+  parens shape), the the PDA stack tracks the call depth. The the example
+  (the ebpf_integration.rs) + the the proof (the tests/sql_ebpf_integration.rs).
+- The SQL subset (the the SELECT/expr/FROM/WHERE, the the left-factored, the the
+  DCFL): the the nesting (the Factor -> ( Expr )) exercises the stack. The the
+  recursive-descent parser is the independent oracle. The the example (the
+  sql_integration.rs) + the the proof (the tests/sql_ebpf_integration.rs).

@@ -29,6 +29,11 @@ pub trait LexerDfa {
 
 /// The token spanner (the T_inv): the (q_lex, terminal sequence) -> the tokens
 /// that produce the sequence from the state.
+///
+/// The two maps are complex (the the q_lex x the token/sequence -> the the
+/// terminals/tokens), so the type_complexity lint is allowed (the the deliberate
+/// precomputed table, the the finite token spanner property).
+#[allow(clippy::type_complexity)]
 pub struct TokenSpanner<L: LexerDfa, T: Tokenizer> {
     // the forward: the (q_lex, token) -> the terminal sequence
     forward: HashMap<(L::LState, T::Token), Vec<L::Terminal>>,
@@ -40,6 +45,7 @@ impl<L: LexerDfa, T: Tokenizer> TokenSpanner<L, T> {
     /// Build the token spanner (the offline preprocessing): drive each DFA over
     /// the vocab for each reachable q_lex, recording the (q_lex, token) ->
     /// sequence + the inverse (q_lex, sequence) -> tokens.
+    #[allow(clippy::type_complexity)]
     pub fn build(dfa: &L, tok: &T, q_lex_states: &[L::LState]) -> Self {
         let mut forward: HashMap<(L::LState, T::Token), Vec<L::Terminal>> = HashMap::new();
         let mut inverse: HashMap<(L::LState, Vec<L::Terminal>), Vec<T::Token>> = HashMap::new();

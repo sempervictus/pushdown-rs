@@ -5,7 +5,7 @@
 //!   - SimdOp: type Output + fn eval<I: Isa>(self, isa: I) -> Self::Output + dispatch()
 //!   - Isa: f.f32() -> impl FloatOps<f32> (extends NumOps, extends BitOps)
 //!   - BitOps: load(&[f32]) -> Simd, store(Simd, &mut [f32]), len() -> usize,
-//!             splat(f32) -> Simd, select(x, y, mask) -> Simd
+//!     splat(f32) -> Simd, select(x, y, mask) -> Simd
 //!   - NumOps: add(x, y) -> Simd, mul(x, y) -> Simd, sub(x, y) -> Simd
 //!   - Lane widths: GenericIs4, AVX2=8, AVX512=16 (for f32)
 //!
@@ -220,7 +220,7 @@ impl SimdOp for MaskOp<'_> {
     fn eval<I: Isa>(self, _isa: I) -> Self::Output {
         // Convert the u8 mask to a u32 VOB, then use the real SIMD broadcast.
         let n = self.out.len();
-        let num_words = (n + 31) / 32;
+        let num_words = n.div_ceil(32);
         let mut vob = vec![0u32; num_words];
         for i in 0..n {
             if self.mask.get(i).copied().unwrap_or(0) == 1 {

@@ -14,6 +14,9 @@ that need them are marked.
 | `deku_integration.rs` | The deku derive-struct parser as the independent oracle. The FixedTlv. The PDA == the deku struct (the differential). | none |
 | `pda_router.rs` | The PDA as a network router/switch (the 2-4). The VLAN membership, the route rules, the ACLs. The micromachine data dump. The with/without SIMD comparison. | none |
 | `dbg_rtn.rs` | The debug dump of the RTN compilation (the states, the transitions, the trace). | none |
+| `viz_dump.rs` | The PDA -> SVG /OT visualization (the viz.rs). The {a^n b^n}, the Dyck, the hand-built DFA. Writes `viz/*.svg` + `viz/*.dot` (the graphviz layout). | none |
+| `sql_integration.rs` | The SQL-subset CFG (the left-factored, the DCFL) + the recursive-descent parser (the independent oracle) + the PDA + the differential + the viz dump. The nesting (the Factor -> ( Expr )) exercises the stack. | none |
+| `ebpf_integration.rs` | The eBPF well-nested call/return CFG (the DCFL, the the PDA stack tracks the call depth) + the call-depth walker (the independent oracle) + the PDA + the differential + the viz dump. | none |
 
 ## Run them
 
@@ -22,8 +25,11 @@ that need them are marked.
    cargo run --release --example benchmark
    cargo run --release --example nom_integration
    cargo run --release --example deku_integration
-   cargo run --release --example pda_router
-   cargo run --release --example dbg_rtn
+cargo run --release --example pda_router
+    cargo run --release --example dbg_rtn
+    cargo run --release --example viz_dump   # the writes viz/*.svg + the/*.dot
+    cargo run --release --example sql_integration   # the the SQL-subset PDA + the recursive-descent oracle
+    cargo run --release --example ebpf_integration  # the the eBPF call/return PDA + the walker oracle
 
    # the real-world (the needs the local fixtures)
    cargo run --release --example bench_realworld

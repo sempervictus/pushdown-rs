@@ -98,6 +98,7 @@ pub mod graph;
 pub mod cuda;
 pub mod spanner;
 pub mod service;
+pub mod viz;
 
 pub use pda::{
     AlternatingPda, Dpda, EmptyStackPda, EpsilonPda, FinalStatePda, NestedStack, OneWayStack, Npda,

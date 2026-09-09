@@ -3,7 +3,7 @@
 //!
 //! Given a CFG G = (N, Sigma, P, S), the compilation yields a PDA with:
 //!   - control states Q = {q_start} U {q_A^in, q_A^out : A in N}
-//!                        U {q_(p,i) : p in P, i in 0..=|rhs(p)|}
+//!     U {q_(p,i) : p in P, i in 0..=|rhs(p)|}
 //!   - stack alphabet Gamma = {bot} U {q_(p,i) : p in P, i}  (the return addresses)
 //!   - the RTN transitions (the start, the choice, the terminal, the call,
 //!     the return, the exit)

@@ -1,6 +1,9 @@
 # the build artifacts
 /target
 
+# the generated viz dumps (the the SVG/DOT/PNG from the viz_dump + the sql/ebpf examples)
+viz/
+
 # the local benchmark fixtures + docs (the the 20MB tokenizer, the grammar
 # samples, the outputs, the methodology). Never committed, not part of the
 # crates.io package.

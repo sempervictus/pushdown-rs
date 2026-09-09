@@ -66,6 +66,7 @@ pub struct PdaMachine {
 
 impl PdaMachine {
     /// Build a machine, validating the bounds.
+    #[allow(clippy::too_many_arguments)] // the the 8-field constructor (the the POD, the the no builder)
     pub fn new(
         num_states: u32,
         num_inputs: u32,
@@ -215,9 +216,9 @@ impl PdaMachine {
 
     /// The universal accepts: auto-selects the right simulation based on the
     /// machine's determinism. Callers do NOT need to know if the machine is a
-    /// DPDA or an NPDA - this picks the correct one.
-    ///   - deterministic: the accepts_dpda (the single path, the fast)
-    ///   - non-deterministic: the accepts_npda (the BFS, the bounded)
+    /// DPDA or an NPDA - this picks the correct one. It uses the deterministic
+    /// path (the accepts_dpda, the single path, the fast) or the
+    /// non-deterministic path (the accepts_npda, the BFS, the bounded).
     /// This is the "stupid-LLM-proof" entry point (the one method to call).
     pub fn accepts(&self, w: &[u32]) -> bool {
         if self.is_deterministic() {
@@ -293,8 +294,8 @@ impl PdaMachine {
         // the mask computation is a random access into the transition table (the
         // the no SIMD win). The SIMD win is the BROADCAST (the mask -> the
         // logit row), which is the MaskOp (the simd.rs).
-        for i in 0..n {
-            out[i] = if self.lookup(state, Some(i as u32), self.start_stack).is_empty() {
+        for (i, out) in out.iter_mut().enumerate() {
+            *out = if self.lookup(state, Some(i as u32), self.start_stack).is_empty() {
                 0
             } else {
                 1
@@ -658,10 +659,8 @@ impl PdaStream for PdaMachine {
                 }
                 // Collect non-epsilon inputs from this state.
                 for a in 0..self.num_inputs {
-                    if !self.lookup(cq, Some(a), ctop).is_empty() {
-                        if !allowed.contains(&a) {
-                            allowed.push(a);
-                        }
+                    if !self.lookup(cq, Some(a), ctop).is_empty() && !allowed.contains(&a) {
+                        allowed.push(a);
                     }
                 }
                 // Follow epsilon transitions.
@@ -719,10 +718,8 @@ impl PdaMachine {
                 continue;
             }
             for a in 0..self.num_inputs {
-                if !self.lookup(cq, Some(a), ctop).is_empty() {
-                    if !allowed.contains(&a) {
-                        allowed.push(a);
-                    }
+                if !self.lookup(cq, Some(a), ctop).is_empty() && !allowed.contains(&a) {
+                    allowed.push(a);
                 }
             }
             for (q2, push) in self.transition(cq, None, ctop) {

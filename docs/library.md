@@ -112,3 +112,27 @@ q, a, top, next_q, push_len, push[]). This is the GPU-uploadable payload.
 The three-way layout-identity invariant: the scalar == the SIMD batch == the
 CUDA kernel, all consuming the same bitvec. This is the proof that the device
 port is correct without a GPU in the loop.
+
+## The visualization (the viz.rs)
+
+The viz.rs is a pure diagnostic VIEW over the machine (the no execution tier,
+the no device-identity link). It renders the control-state graph (the states =
+the nodes, the transitions = the labeled edges) as a human-meaningful picture:
+
+- The to_svg(m, state_names, term_names) - a self-contained SVG (the zero deps,
+  the no-unsafe). The layout is a left-to-right column flow (the BFS depth from
+  the start). The start state is ringed green, the accepting set is filled, the
+  epsilon moves are dashed + red, the terminal moves are solid + grey, and each
+  edge is labeled with the input + the stack op (the pop / the keep / the push(k)).
+- The to_dot(m, state_names, term_names) - a Graphviz DOT file (the run
+  `dot -Tsvg` for a prettier auto-layout).
+- The write_svg / the write_dot - the file writers.
+- The dump_g(g, m, term_names, dir) - the ready-to-render helper: it pulls the
+  state names from the rtn_state_names (the compile.rs) and writes both the
+  .svg + the .dot to the dir.
+
+The rendering invariants (the pure function of the machine): one primary node
+per control state (the node count == the num_states), one edge per transition
+(the edge count == the transitions.len()), and deterministic output (the same
+machine renders identically, the groups are sorted). The viz_dump example
+demonstrates it (the {a^n b^n}, the Dyck, the hand-built DFA-embedded).

@@ -78,5 +78,22 @@ step_batch_simd close this gap.
   balanced-parens + the multi-nonterminal grammar, the exhaustive + the
   boundary corpora, the exact acceptance count).
 - The non-deterministic regex: the [a-z]+ uses the accepts_npda.
+- The visualization (the viz.rs, the pure diagnostic view): the
+  svg_renders_every_state_and_transition (the one marker-end per transition,
+  the one primary circle per state), the dot_renders_every_state_and_transition
+  (the one node line per state, the one edge per transition), the
+  svg_is_deterministic (the same machine renders identically, the sorted edge
+  groups), the kappa_matches_rendered_node_count (the node count == the exact
+  kappa(G)).
+- The SQL subset (the sql_integration, the left-factored DCFL): the
+  the_sql_pda_matches_the_cfg_oracle_exhaustively (the PDA == the cfg_accepts
+  over the 9-terminal alphabet, the length 0..=4), the
+  the_sql_language_matches_the_recursive_descent_oracle (the PDA == the
+  independent recursive-descent parser, the curated boundary cases).
+- The eBPF program (the ebpf_integration, the well-nested call/return DCFL): the
+  the_ebpf_pda_matches_the_cfg_oracle_exhaustively (the PDA == the cfg_accepts
+  over the 4-terminal alphabet, the length 0..=6), the
+  the_ebpf_language_matches_the_walker_oracle (the PDA == the independent
+  call-depth walker, the curated boundary cases).
 
-Run: `cargo test` (the 46 tests + the 1 doc-test, the all green).
+Run: `cargo test` (the 54 tests + the 1 doc-test, the all green).
