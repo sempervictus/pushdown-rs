@@ -33,7 +33,7 @@ use crate::pda::Dpda;
 
 // The layout constants (the pixels).
 const MARGIN_X: f64 = 48.0;
-const MARGIN_TOP: f64 = 24.0;
+const MARGIN_TOP: f64 = 48.0;
 const HEADER_H: f64 = 64.0;
 const COL_W: f64 = 232.0;
 const ROW_H: f64 = 108.0;
@@ -82,15 +82,20 @@ fn layout(m: &PdaMachine) -> Vec<Pos> {
     for (i, d) in depth.iter().enumerate() {
         cols.entry(*d).or_default().push(i);
     }
+    let num_cols = cols.len();
     let max_rows = cols.values().map(|v| v.len()).max().unwrap_or(1);
+    // Density-aware spacing: wide graphs get more column room, tall columns get
+    // more row room, so the edge bundles (the parallel edges) do not pile up.
+    let col_w = COL_W + (num_cols as f64 - 1.0) * 12.0;
+    let row_h = ROW_H + (max_rows as f64 - 1.0) * 10.0;
     let mut pos = vec![Pos { x: 0.0, y: 0.0 }; n];
     for (col, members) in cols.iter() {
         let top_offset = (max_rows - members.len()) / 2;
         for (i, &sid) in members.iter().enumerate() {
             let row = top_offset + i;
             pos[sid] = Pos {
-                x: MARGIN_X + *col as f64 * COL_W + NODE_W / 2.0,
-                y: HEADER_H + MARGIN_TOP + row as f64 * ROW_H + NODE_H / 2.0,
+                x: MARGIN_X + *col as f64 * col_w + NODE_W / 2.0,
+                y: HEADER_H + MARGIN_TOP + row as f64 * row_h + NODE_H / 2.0,
             };
         }
     }
