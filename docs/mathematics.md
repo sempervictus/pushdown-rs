@@ -100,6 +100,8 @@ The test suite (tests/pda_tests.rs) proves:
   + exclusive oracle, the phase-homology).
 - The epsilon-closure advance (the step_batch / the project_batch follow the
   epsilon moves to the terminal state, the no stuck call dots).
+- The mask/advance consistency (the mask_at_cfg == the advance_eps-able inputs
+  over the reachable config space, the proof_mask_batch_consistent_with_advance_eps).
 - The bitvec round-trip (the lossless serialization, the exact POD size).
 - The SWYB soundness (the d_H <= H for all reachable, the d_H = 0 unconditional
   for the accepting).
