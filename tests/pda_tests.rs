@@ -1496,3 +1496,52 @@ fn proof_mask_at_cfg_settled_is_precise() {
         }
     }
 }
+
+// PROOF: the mask_batch (the epsilon-closure mask, the public PdaStream entry)
+// is EXACTLY the set of inputs for which advance_eps (the epsilon-closure
+// advance) succeeds. This is the consistent (mask, advance) pair for the
+// PDA-as-FSM-mirror contract: the mask reports what the advance can consume,
+// and nothing more. Built over the reachable config space (the BFS via
+// advance_eps), so it is a genuine oracle (the no single-config shortcut).
+#[test]
+fn proof_mask_batch_consistent_with_advance_eps() {
+    use pushdown_rs::pda::PdaStream;
+    // a grammar with a call dot (the S -> a A b, A -> c) — the RTN compilation
+    // gives a BOUNDED stack (the D = L + 1), so the reachable config space is
+    // finite and the BFS below terminates. (The {a^n b^n} DPDA is unbounded and
+    // must not be used here.)
+    let g = Cfg::new(2, 3, 0, vec![(0, vec![2, 1, 3]), (1, vec![4])]);
+    let m = pushdown_rs::compile(&g).expect("compile");
+
+    // enumerate the reachable configs (state, stack) via a BFS over advance_eps
+    let mut reachable: Vec<(u32, Vec<u32>)> = vec![(m.start_state, vec![m.start_stack])];
+    let mut i = 0;
+    while i < reachable.len() {
+        let (q, stack) = reachable[i].clone();
+        for a in 0..m.num_inputs {
+            if let Some((nq, ns)) = m.advance_eps(q, &stack, a) {
+                if !reachable.contains(&(nq, ns.clone())) {
+                    reachable.push((nq, ns));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    // for each reachable config, the mask_at_cfg (the single-config
+    // epsilon-closure mask) must be EXACTLY the advance_eps-able inputs (the
+    // inclusive + the exclusive), and must agree with the batched mask_batch.
+    for (q, stack) in &reachable {
+        let mask = m.mask_at_cfg(*q, stack);
+        let mask_batched = m.mask_batch(&[(q.clone(), stack.clone())])[0].clone();
+        assert_eq!(mask, mask_batched, "mask_at_cfg must equal the batched mask_batch");
+        for a in 0..m.num_inputs {
+            let in_mask = mask.contains(&a);
+            let advance_ok = m.advance_eps(*q, stack, a).is_some();
+            assert_eq!(
+                in_mask, advance_ok,
+                "mask_at_cfg must be exactly the advance_eps-able inputs (q={q}, a={a})"
+            );
+        }
+    }
+}

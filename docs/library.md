@@ -62,6 +62,10 @@ The key groups:
 - The advance_eps(q, stk, a) - the epsilon-closure advance (the BFS over the
   epsilon moves to the terminal state, then the terminal move; the no stuck
   call dots). The step_batch / the project_batch use it.
+- The mask_at_cfg(q, stack) - the single-config epsilon-closure mask (the
+  allowed inputs reachable via the epsilon moves); exactly the set for which
+  advance_eps succeeds (the proof_mask_batch_consistent_with_advance_eps).
+  The batched form is mask_batch.
 - The step_batch / the mask_batch / the project_batch - the PdaStream (the
   batched pipeline node).
 - The step_batch_into / the step_batch_simd / the project_batch_simd - the

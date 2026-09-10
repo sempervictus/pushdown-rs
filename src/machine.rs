@@ -738,9 +738,14 @@ impl PdaStream for PdaMachine {
 }
 
 impl PdaMachine {
-    /// The the mask at a single config (the (state, stack)) - the helper
-    /// for the project_batch.
-    fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
+    /// The mask at a single config (the (state, stack)): the epsilon-closure union
+    /// of the allowed inputs (the follow the epsilon moves to every reachable
+    /// config, then collect the terminals with a defined move). This is the
+    /// single-config entry for the PDA-as-FSM-mirror contract — it is exactly
+    /// the set of inputs for which `advance_eps` succeeds (the proof
+    /// `proof_mask_batch_consistent_with_advance_eps`). `mask_batch` is the
+    /// batched form of this same computation.
+    pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
         let top = stack.last().copied().unwrap_or(self.start_stack);
         // Include the epsilon-closure: follow epsilon transitions from (q, top)
         // and collect all allowed inputs from every reachable state.
