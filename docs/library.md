@@ -38,6 +38,9 @@ The PdaMachine is the concrete 7-tuple with u32 IDs:
      accepting: Vec<u32>,           // the F
      start_state, start_stack,      // the q0, the Z0
      state_provenance: Option<Vec<u32>>,  // the RTN state -> nonterminal projection
+     vocab_names: Option<Vec<String>>,    // the terminal labels (the diagnostic)
+     ctrl_offsets: Vec<u32>,        // CSR: the record index of the first transition for state q
+     ctrl_counts: Vec<u32>,        // CSR: the number of transitions for state q
    }
 ```
 
@@ -60,8 +63,10 @@ The key groups:
 - The mask_bits(state) - the O(num_inputs) mask-input scan.
 - The provenance_of(q) - the RTN state -> nonterminal projection (the O(1) lookup).
 - The advance_eps(q, stk, a) - the epsilon-closure advance (the BFS over the
-  epsilon moves to the terminal state, then the terminal move; the no stuck
-  call dots). The step_batch / the project_batch use it.
+   epsilon moves to the terminal state, then the terminal move; the no stuck
+   call dots). Uses the CSR index (ctrl_offsets + ctrl_counts) for O(1-3)
+   transition lookups per state (instead of O(total_transitions) linear scan).
+   The step_batch / the project_batch use it.
 - The mask_at_cfg(q, stack) - the single-config epsilon-closure mask (the
   allowed inputs reachable via the epsilon moves); exactly the set for which
   advance_eps succeeds (the proof_mask_batch_consistent_with_advance_eps).
