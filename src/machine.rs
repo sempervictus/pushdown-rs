@@ -80,7 +80,10 @@ pub struct PdaMachine {
 
 // The CSR fields (ctrl_offsets, ctrl_counts) are derived data (computed from
 // the transitions), not part of the machine's identity. Exclude them from
-// equality.
+// equality. vocab_names is likewise excluded: it is a CPU-side concern that the
+// bitvec POD deliberately does not carry (the consumer re-derives it from the
+// grammar), so a to_bitvec -> from_bitvec round-trip (Some vs None) must still
+// compare equal.
 impl PartialEq for PdaMachine {
     fn eq(&self, other: &Self) -> bool {
         self.num_states == other.num_states
@@ -91,7 +94,6 @@ impl PartialEq for PdaMachine {
             && self.start_state == other.start_state
             && self.start_stack == other.start_stack
             && self.state_provenance == other.state_provenance
-            && self.vocab_names == other.vocab_names
     }
 }
 impl Eq for PdaMachine {}
