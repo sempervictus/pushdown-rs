@@ -133,7 +133,9 @@ fn main() {
         start_state: 0,
         start_stack: 0,
         state_provenance: None, // the hand-built (the no RTN provenance)
-        vocab_names: None, // the hand-built (the no vocabulary labels)
+        vocab_names: None,
+        ctrl_offsets: vec![],
+        ctrl_counts: vec![], // the hand-built (the no vocabulary labels)
     };
     let dfa_names = vec!["start".to_string(), "seen_b".to_string(), "accept".to_string()];
     dump_debug(&m_dfa, "the hand-built DFA-embedded PDA (the (a|b)* a)", Some(&dfa_names));

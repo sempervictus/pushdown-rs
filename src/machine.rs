@@ -21,7 +21,7 @@ pub struct Transition {
 }
 
 /// The concrete PDA machine (the 7-tuple).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PdaMachine {
     pub num_states: u32,
     pub num_inputs: u32,
@@ -69,9 +69,52 @@ pub struct PdaMachine {
     /// `Some` for RTN-compiled machines (the `compile` populates it); `None` for
     /// hand-built ones (the doc example) where the vocabulary labels are not defined.
     pub vocab_names: Option<Vec<String>>,
+    /// CSR index: for each control state q, the starting index into `transitions`
+    /// where q's records begin, and the count of records. This allows O(1-3)
+    /// transition lookups per state (instead of O(total_transitions) linear scan).
+    /// Computed once at construction. The sentinel value (transitions.len()) marks
+    /// the end of the array for states with no transitions.
+    pub ctrl_offsets: Vec<u32>,
+    pub ctrl_counts: Vec<u32>,
 }
 
+// The CSR fields (ctrl_offsets, ctrl_counts) are derived data (computed from
+// the transitions), not part of the machine's identity. Exclude them from
+// equality.
+impl PartialEq for PdaMachine {
+    fn eq(&self, other: &Self) -> bool {
+        self.num_states == other.num_states
+            && self.num_inputs == other.num_inputs
+            && self.num_stack_syms == other.num_stack_syms
+            && self.transitions == other.transitions
+            && self.accepting == other.accepting
+            && self.start_state == other.start_state
+            && self.start_stack == other.start_stack
+            && self.state_provenance == other.state_provenance
+            && self.vocab_names == other.vocab_names
+    }
+}
+impl Eq for PdaMachine {}
+
 impl PdaMachine {
+    /// Compute the CSR index (ctrl_offsets + ctrl_counts) from the transitions.
+    /// This is a static helper for construction sites that build PdaMachine
+    /// directly (not via `PdaMachine::new`).
+    pub fn compute_csr(transitions: &[Transition], num_states: u32) -> (Vec<u32>, Vec<u32>) {
+        let n = num_states as usize;
+        let mut offsets = vec![transitions.len() as u32; n];
+        let mut counts = vec![0u32; n];
+        for (i, t) in transitions.iter().enumerate() {
+            if (t.q as usize) < n {
+                if counts[t.q as usize] == 0 {
+                    offsets[t.q as usize] = i as u32;
+                }
+                counts[t.q as usize] += 1;
+            }
+        }
+        (offsets, counts)
+    }
+
     /// Build a machine, validating the bounds.
     #[allow(clippy::too_many_arguments)] // the the 8-field constructor (the the POD, the the no builder)
     pub fn new(
@@ -85,6 +128,21 @@ impl PdaMachine {
         state_provenance: Option<Vec<u32>>,
         vocab_names: Option<Vec<String>>,
     ) -> StdResult<Self, PdaError> {
+        // Compute the CSR index (ctrl_offsets + ctrl_counts) for O(1) transition
+        // lookups per control state. The transitions are grouped by `q` (the
+        // control state), so the CSR allows the kernel to scan only the
+        // transitions for a specific state (O(1-3) instead of O(total)).
+        let n = num_states as usize;
+        let mut ctrl_offsets = vec![transitions.len() as u32; n]; // sentinel
+        let mut ctrl_counts = vec![0u32; n];
+        for (i, t) in transitions.iter().enumerate() {
+            if (t.q as usize) < n {
+                if ctrl_counts[t.q as usize] == 0 {
+                    ctrl_offsets[t.q as usize] = i as u32;
+                }
+                ctrl_counts[t.q as usize] += 1;
+            }
+        }
         let m = PdaMachine {
             num_states,
             num_inputs,
@@ -95,6 +153,8 @@ impl PdaMachine {
             start_stack,
             state_provenance,
             vocab_names,
+            ctrl_offsets,
+            ctrl_counts,
         };
         m.validate_bounds()?;
         Ok(m)
@@ -201,34 +261,76 @@ impl PdaMachine {
     /// before the terminal move). The RTN epsilon graph is local, so the closure is
     /// bounded; the MAX_EPS_CLOSURE cap is the safety safeguard against a
     /// pathological (the non-RTN) machine.
+    ///
+    /// Uses the CSR index (ctrl_offsets + ctrl_counts) for O(1-3) transition
+    /// lookups per state (instead of O(total_transitions) linear scan).
     pub fn advance_eps(&self, q: u32, stk: &[u32], a: u32) -> Option<(u32, Vec<u32>)> {
         const MAX_EPS_CLOSURE: usize = 4096;
         let mut configs: Vec<(u32, Vec<u32>)> = vec![(q, stk.to_vec())];
         let mut i = 0;
+        let use_csr = !self.ctrl_offsets.is_empty();
         while i < configs.len() && configs.len() < MAX_EPS_CLOSURE {
             let (cq, cstk) = configs[i].clone();
             i += 1;
             let ctop = cstk.last().copied().unwrap_or(self.start_stack);
-            for (q2, push) in self.transition(cq, None, ctop) {
-                let mut ns = cstk.clone();
-                ns.pop();
-                for &p in push.iter().rev() {
-                    ns.push(p);
+            if use_csr {
+                // CSR-based epsilon lookup: scan only cq's transitions (O(1-3)).
+                let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32);
+                let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0);
+                for j in 0..count {
+                    let t = &self.transitions[start as usize + j as usize];
+                    if t.a != self.num_inputs || t.top != ctop {
+                        continue;
+                    }
+                    let mut ns = cstk.clone();
+                    ns.pop();
+                    for &p in t.push.iter().rev() {
+                        ns.push(p);
+                    }
+                    if !configs.iter().any(|(s, ss)| *s == t.next_q && *ss == ns) {
+                        configs.push((t.next_q, ns));
+                    }
                 }
-                if !configs.iter().any(|(s, ss)| *s == q2 && *ss == ns) {
-                    configs.push((q2, ns));
+            } else {
+                // Fallback: linear scan (the original path, for machines without CSR).
+                for (q2, push) in self.transition(cq, None, ctop) {
+                    let mut ns = cstk.clone();
+                    ns.pop();
+                    for &p in push.iter().rev() {
+                        ns.push(p);
+                    }
+                    if !configs.iter().any(|(s, ss)| *s == q2 && *ss == ns) {
+                        configs.push((q2, ns));
+                    }
                 }
             }
         }
+        // Terminal lookup: CSR-based or linear scan.
         for (cq, cstk) in &configs {
             let top = cstk.last().copied().unwrap_or(self.start_stack);
-            if let [t] = self.lookup(*cq, Some(a), top).as_slice() {
-                let mut s2 = cstk.clone();
-                s2.pop();
-                for &p in t.push.iter().rev() {
-                    s2.push(p);
+            if use_csr {
+                let start = self.ctrl_offsets.get(*cq as usize).copied().unwrap_or(self.transitions.len() as u32);
+                let count = self.ctrl_counts.get(*cq as usize).copied().unwrap_or(0);
+                for j in 0..count {
+                    let t = &self.transitions[start as usize + j as usize];
+                    if t.a == a && t.top == top {
+                        let mut s2 = cstk.clone();
+                        s2.pop();
+                        for &p in t.push.iter().rev() {
+                            s2.push(p);
+                        }
+                        return Some((t.next_q, s2));
+                    }
                 }
-                return Some((t.next_q, s2));
+            } else {
+                if let [t] = self.lookup(*cq, Some(a), top).as_slice() {
+                    let mut s2 = cstk.clone();
+                    s2.pop();
+                    for &p in t.push.iter().rev() {
+                        s2.push(p);
+                    }
+                    return Some((t.next_q, s2));
+                }
             }
         }
         None

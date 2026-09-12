@@ -148,7 +148,7 @@ impl PdaMachine {
             num_states,
             num_inputs,
             num_stack_syms,
-            transitions,
+            transitions: transitions.clone(),
             accepting,
             start_state,
             start_stack,
@@ -156,6 +156,31 @@ impl PdaMachine {
             // The bitvec (the H2D payload) does not carry the vocabulary names (the
             // CPU-side concern); the consumer re-derives them from the grammar.
             vocab_names: None,
+            // Compute the CSR index (the O(1) transition look per state).
+            ctrl_offsets: {
+                let n = num_states as usize;
+                let mut offsets = vec![transitions.len() as u32; n];
+                let mut counts = vec![0u32; n];
+                for (i, t) in transitions.iter().enumerate() {
+                    if (t.q as usize) < n {
+                        if counts[t.q as usize] == 0 {
+                            offsets[t.q as usize] = i as u32;
+                        }
+                        counts[t.q as usize] += 1;
+                    }
+                }
+                offsets
+            },
+            ctrl_counts: {
+                let n = num_states as usize;
+                let mut counts = vec![0u32; n];
+                for t in &transitions {
+                    if (t.q as usize) < n {
+                        counts[t.q as usize] += 1;
+                    }
+                }
+                counts
+            },
         };
         m.validate_bounds().map_err(|e| BitvecError::Malformed(e.to_string()))?;
         Ok(m)

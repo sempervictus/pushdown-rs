@@ -79,6 +79,8 @@
 //!     start_stack: Z,
 //!     state_provenance: None, // the hand-built machine (the no RTN provenance)
 //!     vocab_names: None, // the hand-built machine (the no vocabulary labels)
+//!     ctrl_offsets: vec![], // the no CSR (the linear-scan fallback in advance_eps)
+//!     ctrl_counts: vec![],
 //! };
 //! assert!(m.is_deterministic());
 //! assert!(m.accepts_dpda(&[A, B]));

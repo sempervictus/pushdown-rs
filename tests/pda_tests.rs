@@ -69,6 +69,8 @@ fn anb_n_dpda() -> PdaMachine {
         start_stack: Z,
         state_provenance: None,
         vocab_names: None,
+        ctrl_offsets: vec![],
+        ctrl_counts: vec![],
     }
 }
 

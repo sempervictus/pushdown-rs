@@ -256,7 +256,7 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
         num_states,
         num_inputs: num_tm,
         num_stack_syms,
-        transitions,
+        transitions: transitions.clone(),
         accepting,
         start_state: Q_START,
         start_stack: 0,
@@ -267,6 +267,31 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
                 .map(|t| g.terminal_name(t))
                 .collect(),
         ),
+        // Compute the CSR index (the O(1) transition lookup per state).
+        ctrl_offsets: {
+            let n = num_states as usize;
+            let mut offsets = vec![transitions.len() as u32; n];
+            let mut counts = vec![0u32; n];
+            for (i, t) in transitions.iter().enumerate() {
+                if (t.q as usize) < n {
+                    if counts[t.q as usize] == 0 {
+                        offsets[t.q as usize] = i as u32;
+                    }
+                    counts[t.q as usize] += 1;
+                }
+            }
+            offsets
+        },
+        ctrl_counts: {
+            let n = num_states as usize;
+            let mut counts = vec![0u32; n];
+            for t in &transitions {
+                if (t.q as usize) < n {
+                    counts[t.q as usize] += 1;
+                }
+            }
+            counts
+        },
     })
 }
 
