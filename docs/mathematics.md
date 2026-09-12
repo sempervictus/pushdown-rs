@@ -75,6 +75,15 @@ dots (the no direct terminal move), inconsistent with the mask.
 
 The step_batch and the project_batch use advance_eps (the no stuck call dots).
 
+The CSR index (ctrl_offsets + ctrl_counts, computed at construction) makes
+the advance_eps transition lookup O(1-3) per state (instead of O(total)
+linear scan). The CSR groups transitions by their control state q, so the
+epsilon-closure BFS and the terminal move only scan the transitions for the
+current state (typically 1-3 for RTN-compiled machines). The GPU kernel
+(the attention-rs PdaPushdownTable) uses the same CSR format (the
+ctrl_offsets + ctrl_counts uploaded to the GPU), so the CPU and GPU
+paths are consistent (the three-way identity, the P8 property).
+
 ## The state provenance
 
 The RTN state -> nonterminal projection (the state_provenance, the Definition 5):
