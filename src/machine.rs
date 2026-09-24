@@ -1,7 +1,7 @@
 //! The concrete PDA machine (the 7-tuple with u32 IDs) + the variant trait
 //! impls (the NPDA, the DPDA, the epsilon, the final-state, the empty-stack).
 
-use crate::pda::{Dpda, EmptyStackPda, EpsilonPda, FinalStatePda, Npda, Pda, PdaStream};
+use crate::pda::{DisplacementPda, Dpda, EmptyStackPda, EpsilonPda, FinalStatePda, Npda, Pda, PdaStream};
 use std::result::Result as StdResult;
 
 /// The default bounds for the NPDA search (the accepts_npda's safeguards).
@@ -123,17 +123,25 @@ impl PdaMachine {
         num_states: u32,
         num_inputs: u32,
         num_stack_syms: u32,
-        transitions: Vec<Transition>,
+        mut transitions: Vec<Transition>,
         accepting: Vec<u32>,
         start_state: u32,
         start_stack: u32,
         state_provenance: Option<Vec<u32>>,
         vocab_names: Option<Vec<String>>,
     ) -> StdResult<Self, PdaError> {
+        // Sort the transitions by (q, a, top) so the CSR computed below is
+        // VALID: each control state's transitions must be contiguous. The CSR
+        // (the first-occurrence + count) assumes per-state contiguity, which
+        // the caller's array order does not guarantee (the RTN build pushes in
+        // production order). The sort is a reordering (the transition set is
+        // unchanged), so it preserves the machine's language + the identity
+        // chain.
+        transitions.sort_by_key(|t| (t.q, t.a, t.top));
         // Compute the CSR index (ctrl_offsets + ctrl_counts) for O(1) transition
         // lookups per control state. The transitions are grouped by `q` (the
-        // control state), so the CSR allows the kernel to scan only the
-        // transitions for a specific state (O(1-3) instead of O(total)).
+        // control state, the sorted above), so the CSR allows the kernel to scan
+        // only the transitions for a specific state (O(1-3) instead of O(total)).
         let n = num_states as usize;
         let mut ctrl_offsets = vec![transitions.len() as u32; n]; // sentinel
         let mut ctrl_counts = vec![0u32; n];
@@ -856,24 +864,56 @@ impl PdaMachine {
         let mut allowed: Vec<u32> = Vec::new();
         let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
         let mut frontier = vec![(q, top)];
+        let use_csr = !self.ctrl_offsets.is_empty();
         while let Some((cq, ctop)) = frontier.pop() {
             if !visited.insert((cq, ctop)) {
                 continue;
             }
-            for a in 0..self.num_inputs {
-                if !self.lookup(cq, Some(a), ctop).is_empty() && !allowed.contains(&a) {
-                    allowed.push(a);
+            if use_csr {
+                // The CSR fast path: scan only cq's transitions (the O(counts[cq])).
+                let start = self
+                    .ctrl_offsets
+                    .get(cq as usize)
+                    .copied()
+                    .unwrap_or(self.transitions.len() as u32) as usize;
+                let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                for t in &self.transitions[start..start + count] {
+                    if t.top != ctop {
+                        continue;
+                    }
+                    if t.a < self.num_inputs {
+                        // An input-consuming move: collect the input.
+                        if !allowed.contains(&t.a) {
+                            allowed.push(t.a);
+                        }
+                    } else {
+                        // An epsilon move: follow it to the next config.
+                        let new_top = if t.push.is_empty() {
+                            ctop
+                        } else {
+                            // The push is applied in reverse (the step_batch's
+                            // iter().rev()), so the new top is push.first() (the
+                            // push[0], the return address for a call).
+                            *t.push.first().unwrap()
+                        };
+                        frontier.push((t.next_q, new_top));
+                    }
                 }
-            }
-            for (q2, push) in self.transition(cq, None, ctop) {
-                let new_top = if push.is_empty() {
-                    ctop
-                } else {
-                    // The push is applied in reverse (the step_batch's iter().rev()), so the
-                    // new top is push.first() (the push[0], the return address for a call).
-                    *push.first().unwrap()
-                };
-                frontier.push((q2, new_top));
+            } else {
+                // The linear fallback (the hand-built machine, the no CSR).
+                for a in 0..self.num_inputs {
+                    if !self.lookup(cq, Some(a), ctop).is_empty() && !allowed.contains(&a) {
+                        allowed.push(a);
+                    }
+                }
+for (q2, push) in self.transition(cq, None, ctop) {
+                    let new_top = if push.is_empty() {
+                        ctop
+                    } else {
+                        *push.first().unwrap()
+                    };
+                    frontier.push((q2, new_top));
+                }
             }
         }
         allowed
@@ -890,17 +930,303 @@ impl PdaMachine {
     /// proof_mask_at_cfg_settled_is_precise (the pda_tests.rs).
     pub fn mask_at_cfg_settled(&self, q: u32, top: u32) -> Vec<u32> {
         let mut allowed: Vec<u32> = Vec::new();
-        for a in 0..self.num_inputs {
-            if !self.lookup(q, Some(a), top).is_empty() {
-                allowed.push(a);
+        if self.ctrl_offsets.is_empty() {
+            // The linear fallback (the hand-built machine, the no CSR): scan all
+            // inputs via the order-independent `lookup`.
+            for a in 0..self.num_inputs {
+                if !self.lookup(q, Some(a), top).is_empty() {
+                    allowed.push(a);
+                }
+            }
+        } else {
+            // The CSR fast path: scan only q's transitions (the O(counts[q]),
+            // the sorted-by-q array). Collect the inputs with a defined move at
+            // (q, a, top). This is the O(1-3) replacement for the O(num_inputs
+            // x total_transitions) linear scan.
+            let start = self
+                .ctrl_offsets
+                .get(q as usize)
+                .copied()
+                .unwrap_or(self.transitions.len() as u32) as usize;
+            let count = self.ctrl_counts.get(q as usize).copied().unwrap_or(0) as usize;
+            for t in &self.transitions[start..start + count] {
+                if t.top == top && t.a < self.num_inputs && !allowed.contains(&t.a) {
+                    allowed.push(t.a);
+                }
             }
         }
         allowed
+    }
+
+    /// Whether the config (q, stack) can reach an accepting state via epsilon
+    /// moves only (the no input consumed). This is the PDA's final-state
+    /// acceptance criterion at the config level: the PDA has "finished" the
+    /// grammar iff the epsilon-closure of the current config contains an
+    /// accepting state.
+    ///
+    /// This is the correct check for the EOS (the end-of-sequence) token: after
+    /// consuming the last grammar token, the PDA may be at a dot state (the
+    /// q_(p,m)), and the accepting state (the q_out(start)) is reached only via
+    /// the exit epsilon move. Checking `accepting.contains(q)` (the is q itself
+    /// accepting) would reject the EOS in that case. `accepts_via_eps` follows
+    /// the epsilon closure and accepts correctly.
+    ///
+    /// The stack is tracked in full (the call pushes, the return pops), so the
+    /// closure is over the (q, stack) configs (the bounded by the D, bound).
+    /// O(epsilon_closure) via the CSR (the sorted-by-q array); the linear
+    /// fallback for the hand-built machines (the no CSR).
+    pub fn accepts_via_eps(&self, q: u32, stack: &[u32]) -> bool {
+        let mut visited: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+        let mut frontier: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
+        let use_csr = !self.ctrl_offsets.is_empty();
+        while let Some((cq, cstk)) = frontier.pop() {
+            if !visited.insert((cq, cstk.clone())) {
+                continue;
+            }
+            if self.accepting.contains(&cq) {
+                return true;
+            }
+            let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+            if use_csr {
+                let start = self
+                    .ctrl_offsets
+                    .get(cq as usize)
+                    .copied()
+                    .unwrap_or(self.transitions.len() as u32) as usize;
+                let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                for t in &self.transitions[start..start + count] {
+                    if t.top != ctop || t.a < self.num_inputs {
+                        continue; // only the epsilon moves (the a == num_inputs) with the matching top
+                    }
+                    let mut ns = cstk.clone();
+                    ns.pop();
+                    for &p in t.push.iter().rev() {
+                        ns.push(p);
+                    }
+                    frontier.push((t.next_q, ns));
+                }
+            } else {
+                for (q2, push) in self.transition(cq, None, ctop) {
+                    let mut ns = cstk.clone();
+                    ns.pop();
+                    for &p in push.iter().rev() {
+                        ns.push(p);
+                    }
+                    frontier.push((q2, ns));
+                }
+            }
+        }
+        false
+    }
+
+    /// The pass-through predicate. True iff the input-consuming transition at config    /// config (q, top) for input `a` preserves the stack top (the push == [top]):
+    /// a "shift" that does not modify the stack. In the RTN construction these are
+    /// exactly the terminal moves (the dot advances within a production, the phase
+    /// is invariant). This is the complement of the control edges (the call /
+    /// return / choice / exit, which push, pop, or branch).
+    ///
+    /// O(1-3) via the CSR (the sorted-by-q array); the linear fallback for the
+    /// hand-built machines (the no CSR).
+    pub fn is_passthrough(&self, q: u32, top: u32, a: u32) -> bool {
+        if a >= self.num_inputs {
+            return false; // the epsilon is not a pass-through (the no input consumed)
+        }
+        if self.ctrl_offsets.is_empty() {
+            // The linear fallback: scan all of q's transitions.
+            return self
+                .transitions
+                .iter()
+                .any(|t| t.q == q && t.a == a && t.top == top && t.push.len() == 1 && t.push[0] == top);
+        }
+        let start = self
+            .ctrl_offsets
+            .get(q as usize)
+            .copied()
+            .unwrap_or(self.transitions.len() as u32) as usize;
+        let count = self.ctrl_counts.get(q as usize).copied().unwrap_or(0) as usize;
+        for t in &self.transitions[start..start + count] {
+            if t.a == a && t.top == top && t.push.len() == 1 && t.push[0] == top {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The next control state via the input-consuming pass-through shift from `q`
+    /// (the stack-preserving terminal move), or None when there is no such move
+    /// (a control edge, or an epsilon-only state). O(counts[q]) via the CSR.
+    fn passthrough_next(&self, q: u32) -> Option<u32> {
+        if self.ctrl_offsets.is_empty() {
+            for t in self.transitions.iter().filter(|t| t.q == q) {
+                if t.a < self.num_inputs && t.push.len() == 1 && t.push[0] == t.top {
+                    return Some(t.next_q);
+                }
+            }
+            return None;
+        }
+        let start = self
+            .ctrl_offsets
+            .get(q as usize)
+            .copied()
+            .unwrap_or(self.transitions.len() as u32) as usize;
+        let count = self.ctrl_counts.get(q as usize).copied().unwrap_or(0) as usize;
+        for t in &self.transitions[start..start + count] {
+            if t.a < self.num_inputs && t.push.len() == 1 && t.push[0] == t.top {
+                return Some(t.next_q);
+            }
+        }
+        None
+    }
+
+    /// The linear-run length from control state `q`: the number of consecutive
+    /// pass-through (the stack-preserving) shifts before the next control edge
+    /// (the call / return / choice / exit). In the RTN construction this is the
+    /// run of consecutive terminals in the production's rhs starting at the dot
+    /// (the top-independent: the terminal shifts preserve the stack top).
+    ///
+    /// The run is bounded by the production length (the six-property "bounded
+    /// control"), never by the input length. O(run x counts[q]) via the CSR.
+    pub fn passthrough_run(&self, q: u32) -> u32 {
+        let cap = self.num_states; // the safety cap (the no infinite loop)
+        let mut cur = q;
+        let mut depth = 0u32;
+        while depth < cap {
+            match self.passthrough_next(cur) {
+                Some(nq) => {
+                    cur = nq;
+                    depth += 1;
+                }
+                None => break,
+            }
+        }
+        depth
+    }
+
+    /// The displacement of a terminal sequence `t` (the CFGzip Theorem 2 primitive):
+    /// the set of (in_config, out_config) pairs such that out_config is reachable
+    /// from in_config by consuming `t` (via the PDA's transition function). This is
+    /// the pure, context-free stack-transformation function that defines the token
+    /// equivalence classes (the displacement partition): two tokens are
+    /// interchangeable iff they have the same displacement.
+    ///
+    /// The config is the (control_state, stack) pair. The displacement is computed
+    /// by simulating the PDA over `t` from every reachable in_config (the bounded
+    /// stack, the six-property "bounded pushdown"). This is a pure function (the no
+    /// temporary state approximating the math): the input is the terminal sequence,
+    /// the output is the set of (in_config, out_config) pairs.
+    ///
+    /// O(reachable_configs x |t| x transitions[q]) via the CSR (the sorted-by-q array).
+    pub fn displacement(&self, t: &[u32]) -> Vec<(u32, Vec<u32>, u32, Vec<u32>)> {
+        // The reachable in_configs (the BFS over the PDA's epsilon closure from the
+        // start config, the bounded stack).
+        let mut in_configs: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
+        let mut i = 0;
+        while i < in_configs.len() {
+            let (q, stack) = in_configs[i].clone();
+            for a in 0..self.num_inputs {
+                if let Some((nq, ns)) = self.advance_eps(q, &stack, a) {
+                    if !in_configs.contains(&(nq, ns.clone())) {
+                        in_configs.push((nq, ns));
+                    }
+                }
+            }
+            i += 1;
+        }
+        // For each in_config, simulate the PDA over `t` (the terminal sequence) and
+        // collect the (in_config, out_config) pairs.
+        let mut result: Vec<(u32, Vec<u32>, u32, Vec<u32>)> = Vec::new();
+        for (in_q, in_stack) in &in_configs {
+            let mut ctrl = *in_q;
+            let mut stack = in_stack.clone();
+            let mut diverged = false;
+            for &a in t {
+                match self.advance_eps(ctrl, &stack, a) {
+                    Some((nq, ns)) => {
+                        ctrl = nq;
+                        stack = ns;
+                    }
+                    None => {
+                        diverged = true;
+                        break; // the sequence diverged (the no out_config)
+                    }
+                }
+            }
+            if !diverged {
+                result.push((*in_q, in_stack.clone(), ctrl, stack));
+            }
+        }
+        result
+    }
+
+    /// The displacement partition (the CFGzip Theorem 2): group a set of terminal
+    /// sequences by their displacement (the set of (in_config, out_config) pairs).
+    /// Two sequences are in the same group iff they have the same displacement (the
+    /// interchangeable tokens). This is the bridge (the terminal -> token map)
+    /// computed via the displacement equivalence (the no DFA).
+    pub fn displacement_partition(&self, sequences: &[Vec<u32>]) -> Vec<Vec<usize>> {
+        // The displacement signature (the sorted set of (in_config, out_config) pairs)
+        // for each sequence.
+        let signatures: Vec<Vec<(u32, Vec<u32>, u32, Vec<u32>)>> =
+            sequences.iter().map(|s| self.displacement(s)).collect();
+        // Group the sequences by their signature (the displacement equivalence).
+        let mut groups: Vec<(Vec<(u32, Vec<u32>, u32, Vec<u32>)>, Vec<usize>)> = Vec::new();
+        for (idx, sig) in signatures.iter().enumerate() {
+            match groups.iter_mut().find(|(g, _)| g == sig) {
+                Some((_, ids)) => ids.push(idx),
+                None => groups.push((sig.clone(), vec![idx])),
+            }
+        }
+        groups.into_iter().map(|(_, ids)| ids).collect()
+    }
+
+    /// The displacement composition (the functional property): the displacement of
+    /// the concatenation t1 ++ t2 is the composition of the displacements (the
+    /// D(t1 ++ t2) = D(t2) D(t1), the t1 is consumed first, then the t2). This is
+    /// the relation composition (the set of (in_config, out_config) pairs such that
+    /// there exists an intermediate config).
+    ///
+    /// The `d_first` is the displacement of t1 (the consumed first), and the
+    /// `d_second` is the displacement of t2 (the consumed second). The composition
+    /// is the d_second o the d_first (the relation composition).
+    pub fn displacement_compose(
+        d_first: &[(u32, Vec<u32>, u32, Vec<u32>)],
+        d_second: &[(u32, Vec<u32>, u32, Vec<u32>)],
+    ) -> Vec<(u32, Vec<u32>, u32, Vec<u32>)> {
+        // The relation composition: the (a_in_ctrl, a_in_stack, c_out_ctrl,
+        // c_out_stack) quadruples such that there exists an intermediate
+        // (b_ctrl, b_stack) with (a_in_ctrl, a_in_stack, b_ctrl, b_stack) in
+        // d_first AND (b_ctrl, b_stack, c_out_ctrl, c_out_stack) in d_second.
+        let mut result: Vec<(u32, Vec<u32>, u32, Vec<u32>)> = Vec::new();
+        for &(a_in_ctrl, ref a_in_stack, b_ctrl, ref b_stack) in d_first {
+            for &(c_in_ctrl, ref c_in_stack, c_out_ctrl, ref c_out_stack) in d_second {
+                if b_ctrl == c_in_ctrl && b_stack == c_in_stack {
+                    result.push((a_in_ctrl, a_in_stack.clone(), c_out_ctrl, c_out_stack.clone()));
+                }
+            }
+        }
+        result
     }
 }
 impl EpsilonPda for PdaMachine {}
 impl FinalStatePda for PdaMachine {}
 impl EmptyStackPda for PdaMachine {}
+impl DisplacementPda for PdaMachine {
+    fn is_passthrough(&self, q: u32, top: u32, a: u32) -> bool {
+        self.is_passthrough(q, top, a)
+    }
+    fn passthrough_run(&self, q: u32) -> u32 {
+        self.passthrough_run(q)
+    }
+    fn displacement(&self, t: &[u32]) -> Vec<(u32, Vec<u32>, u32, Vec<u32>)> {
+        self.displacement(t)
+    }
+    fn displacement_partition(&self, sequences: &[Vec<u32>]) -> Vec<Vec<usize>> {
+        self.displacement_partition(sequences)
+    }
+    fn accepts_via_eps(&self, q: u32, stack: &[u32]) -> bool {
+        self.accepts_via_eps(q, stack)
+    }
+}
 
 /// Errors from the PDA machine validation.
 #[derive(Debug, Clone, PartialEq, Eq)]

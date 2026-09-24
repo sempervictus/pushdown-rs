@@ -252,6 +252,17 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
             state_provenance[q as usize] = a_id;
         }
     }
+    // Sort the transitions by (q, a, top) so the CSR index (the ctrl_offsets +
+    // the ctrl_counts, the first-occurrence + count) is VALID: each control
+    // state's transitions are contiguous in the array. The RTN build above
+    // pushes them in production order (the q_in of with multiple
+    // productions are scattered), which breaks the CSR contiguity assumption.
+    // Sorting is stable in (q, a, top), so the order is deterministic and the
+    // bitvec (the POD) serializes the sorted array. Every device tier (the
+    // scalar, the SIMD, the CUDA) reconstructs the same valid CSR from the
+    // same sorted bitvec (the three-way layout-identity invariant is preserved:
+    // the sort is a reordering, not a change to the transition set).
+    transitions.sort_by_key(|t| (t.q, t.a, t.top));
     Ok(PdaMachine {
         num_states,
         num_inputs: num_tm,

@@ -104,8 +104,8 @@ pub mod service;
 pub mod viz;
 
 pub use pda::{
-    AlternatingPda, Dpda, EmptyStackPda, EpsilonPda, FinalStatePda, NestedStack, OneWayStack, Npda,
-    Pda, VisiblyPushdown,
+    AlternatingPda, DisplacementPda, Dpda, EmptyStackPda, EpsilonPda, FinalStatePda, NestedStack,
+    OneWayStack, Npda, Pda, VisiblyPushdown,
 };
 pub use machine::{PdaError, PdaMachine, Transition};
 pub use compile::{Cfg, CfgError, Grammar, NamedCfg, kappa};

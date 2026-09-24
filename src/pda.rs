@@ -100,6 +100,45 @@ pub trait VisiblyPushdown: Pda {
     fn is_internal(&self, a: Self::Input) -> bool;
 }
 
+/// The displacement / pass-through primitives (the pure automata-theoretic
+/// layer, the no consumer-specific framing). These are the "no control edge"
+/// signal (the stack-preserving shift) and the displacement equivalence (the
+/// CFGzip Theorem 2: two input sequences are interchangeable iff they induce
+/// the same stack-transformation relation). Generic over any PDA consumer (the
+/// LLM decoding, the networking,, the BPF verifier, the SQL parser).
+///
+/// The methods are on the concrete u32-ID machine (the PdaMachine's State,
+/// Input, StackSym are all u32).
+pub trait DisplacementPda {
+    /// The "no control edge" signal: true iff the input `a` at config (q, top)
+    /// is a stack-preserving shift (the identity-stack input-consuming move,
+    /// the push == [top]). This is the linear-run case (the dot advance within
+    /// a production, the no call / return / choice / exit).
+    fn is_passthrough(&self, q: u32, top: u32, a: u32) -> bool;
+    /// The linear-run length from control state q (the number of consecutive
+    /// stack-preserving shifts before the next control edge). Bounded by the
+    /// production length (the six-property "bounded control"), never the input
+    /// length.
+    fn passthrough_run(&self, q: u32) -> u32;
+    /// The displacement of the input sequence t (the set of (in_config,
+    /// out_config) pairs such that out_config is reachable from in_config by
+    /// consuming t). This is the pure, context-free stack-transformation
+    /// relation that defines the input-sequence equivalence classes (the
+    /// displacement partition): two sequences are interchangeable iff they
+    /// induce the same displacement.
+    fn displacement(&self, t: &[u32]) -> Vec<(u32, Vec<u32>, u32, Vec<u32>)>;
+    /// The displacement partition: group a set of input sequences by their
+    /// displacement (the set of (in_config, out_config) pairs). Two sequences
+    /// are in the same group iff they have the same displacement (the
+    /// interchangeable inputs, the CFGzip Theorem 2).
+    fn displacement_partition(&self, sequences: &[Vec<u32>]) -> Vec<Vec<usize>>;
+    /// Whether the config (q, stack) can reach an accepting state via epsilon
+    /// moves only (the no input consumed). This is the PDA's final-state
+    /// acceptance criterion at the config level (the correct "done" check: the
+    /// accepting state may be one epsilon move away, not at the current node).
+    fn accepts_via_eps(&self, q: u32, stack: &[u32]) -> bool;
+}
+
 /// An alternating pushdown automaton: the transitions carry AND/OR branching
 /// (the alternating, strictly more expressive than the NPDA).
 pub trait AlternatingPda: Pda {}
