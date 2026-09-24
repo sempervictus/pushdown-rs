@@ -269,4 +269,100 @@ mod simd_accuracy {
             "the mask at the start config must be non-empty (the PDA has legal inputs)"
         );
     }
+
+    /// PROOF: the mask broadcast (the f32 SIMD add) is bit-exact at the BIG
+    /// vocab sizes (the 32K, the 248K) that actually load the 512-bit SIMD
+    /// pipeline (the 16 f32 lanes). The small-vocab tests (the 1-4096) do not
+    /// load the full ; this test does.
+    #[test]
+    fn mask_broadcast_big_vocab_bit_exact() {
+        // The big vocab sizes (the 32K, the 248K) that load the 512-bit SIMD
+        // pipeline (the 16 f32 lanes).
+        for &vocab in &[32_000usize, 248_320] {
+            // Deterministic pseudo-random logits (the seeded by the vocab size).
+            let logits: Vec<f32> = (0..vocab).map(|i| (i as f32) * 0.001 - 5.0).collect();
+            // The bias: the alternating allowed/disallowed pattern (the 0.0 / the -inf).
+            let mask_words: Vec<u32> = (0..(vocab + 31) / 32)
+                .map(|w| if w % 2 == 0 { 0xAAAAAAAA } else { 0x55555555 })
+                .collect();
+            let bias = compute_bias(&mask_words, vocab);
+
+            // The scalar reference.
+            let mut out_scalar = vec![0.0f32; vocab];
+            {
+                let mut op = MaskBroadcastOp::new(&logits, &bias, &mut out_scalar);
+                op.scalar();
+            }
+            // The SIMD dispatch (the f32 SIMD add, the 512-bit pipeline).
+            let mut out_simd = vec![0.0f32; vocab];
+            {
+                let op = MaskBroadcastOp::new(&logits, &bias, &mut out_simd);
+                op.dispatch();
+            }
+            assert_eq!(
+                out_scalar, out_simd,
+                "vocab={vocab}: the SIMD mask broadcast must be bit-exact (the 512-bit pipeline loaded)"
+            );
+        }
+    }
+
+    /// PROOF: the SimdPipeline's mask_broadcast (the B lanes -> the B masks ->
+    /// the B logit rows) is bit-exact vs the scalar reference at the BIG batch
+    /// sizes (the B >= 16, the 512-bit u32 lanes loaded). The B configs are the
+    /// (ctrl, stack) pairs (the B sequences). The B masks are the allowed inputs;
+    /// the B logit rows are the f32 vectors (the vocab size).
+    #[test]
+    fn simd_pipeline_mask_broadcast_big_batch_bit_exact() {
+        use pushdown_rs::compile::Cfg;
+        use pushdown_rs::simd_pipeline::SimdPipeline;
+        // A nested CFG (the bounded stack, the DCFL shape).
+        let g = Cfg::new(
+            2,
+            3,
+            0,
+            vec![
+                (0, vec![1, 0, 2]), // S -> a S b
+                (0, vec![]),        // S -> eps
+            ],
+        );
+        let pda = pushdown_rs::compile(&g).expect("compile");
+        let pipeline = SimdPipeline::new(&pda);
+        // The B configs (the B >= 16, the 512-bit u32 lanes loaded).
+        let b = 32;
+        let configs: Vec<(u32, Vec<u32>)> = (0..b)
+            .map(|i| (pda.start_state, vec![pda.start_stack]))
+            .collect();
+        // The B masks (the allowed inputs at the B configs).
+        let masks = pipeline.mask_batch(&configs);
+        assert_eq!(masks.len(), b, "the B masks must be produced (the B configs)");
+        // The B logit rows (the f32 vectors, the vocab size = the num_inputs).
+        let vocab = pda.num_inputs as usize;
+        let logits: Vec<Vec<f32>> = (0..b)
+            .map(|i| (0..vocab).map(|j| (i * vocab + j) as f32 * 0.001).collect())
+            .collect();
+        let mut out = vec![vec![0.0f32; vocab]; b];
+        pipeline.mask_broadcast(&masks, &logits, &mut out);
+        // The scalar reference (the no SIMD, the per-lane scalar).
+        let mut out_ref = vec![vec![0.0f32; vocab]; b];
+        for i in 0..b {
+            let mask_words: Vec<u32> = {
+                let num_words = (vocab + 31) / 32;
+                let mut words = vec![0u32; num_words];
+                for &a in &masks[i] {
+                    if (a as usize) < vocab {
+                        words[a as usize / 32] |= 1u32 << (a as usize % 32);
+                    }
+                }
+                words
+            };
+            let bias = compute_bias(&mask_words, vocab);
+            for j in 0..vocab {
+                out_ref[i][j] = logits[i][j] + bias[j];
+            }
+        }
+        assert_eq!(
+            out, out_ref,
+            "the SimdPipeline maskk_broadcast must be bit-exact vs the scalar reference (the B = {b}, the 512-bit pipeline loaded)"
+        );
+    }
 }

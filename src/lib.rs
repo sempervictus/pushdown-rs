@@ -94,6 +94,8 @@ pub mod compile;
 pub mod bitvec;
 #[cfg(feature = "simd")]
 pub mod simd;
+#[cfg(feature = "simd")]
+pub mod simd_pipeline;
 pub mod summary;
 pub mod mask_class;
 pub mod oracle;

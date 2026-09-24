@@ -23,14 +23,18 @@ exclude = [
 [dependencies]
 bitvec = "1"
 rten-simd = { version = "0.26", optional = true }
+fearless_simd = { version = "1.0", optional = true }
 smoltcp = { version = "0.12", optional = true }
 
 [features]
 default = ["simd"]
-# the SIMD branch (the the rten-simd). ON by default: the the step_batch/
-# project_batch streaming interface is the primary path. The scalar code stays
-# as the fallback when the simd feature is disabled (the the --no-default-features).
-simd = ["dep:rten-simd"]
+# the SIMD branch (the rten-simd + the fearless_simd). ON by default: the
+# step_batch / project_batch streaming interface is the primary path. The scalar
+# code stays as the fallback when the simd feature is disabled (the
+# --no-default-features). The fearless_simd provides the AVX-512 VGATHER (the
+# CSR gather, the B lanes gather their CSR rows in parallel) + the portable
+# fallback (the AVX2, the SSE2, the NEON, the WASM).
+simd = ["dep:rten-simd", "dep:fearless_simd"]
 # the CUDA FFI declarations (the the extern "C" block, the the pda_ffi.h contract).
 # The the attention-rs provides the implementations; this is the declaration
 # side (the the compiles without a GPU, the the links against the attention-rs).

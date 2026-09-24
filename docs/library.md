@@ -152,6 +152,12 @@ q, a, top, next_q, push_len, push[]). This is the GPU-uploadable payload.
 
 - The simd.rs - the rten-simd vectorized ops (the MaskOp broadcast, the
   StepBatchOp). The simd feature (default on).
+- The simd_pipeline.rs - the SimdPipeline (the B-lane parallelism, the no
+  per-lane scalar). The pipeline nodes (the mask, the step, the project, the
+  event scan). The mask_broadcast is the f32 SIMD add (the existing
+  MaskBroadcastOp, the bit-exact). The CSR gather (the B lanes gather their
+  CSR rows in parallel) is the AVX-512 VGATHER (the fearless_simd kernel!, the
+  next increment).
 - The service.rs - the PdaService (the packet-in/packet-out device
   model, the batched pipeline node boundary).
 - The graph.rs - the PdaGraph (the CUDA DAG of the kernel nodes, the

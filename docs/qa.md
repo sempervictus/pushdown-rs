@@ -48,6 +48,16 @@ The device PDA (the step_batch) is slower than the scalar at small batch
 (the per-item Vec allocation). The step_batch_into (the no-alloc) + the
 step_batch_simd close this gap.
 
+### The SIMD pipeline (the SimdPipeline, the B-lane parallelism)
+The SimdPipeline (the simd_pipeline.rs) is the B-lane parallelism (the B
+sequences in B SIMD lanes, the no per-lane scalar). The mask_broadcast is the
+f32 SIMD add (the existing MaskBroadcastOp, the bit-exact). The big-value
+tests (the mask_broadcast_big_vocab_bit_exact, the
+simd_pipeline_mask_broadcast_big_batch_bit_exact) load the 512-bit SIMD
+pipeline (the 16 f32 lanes, the 16 u32 lanes) at the 32K/248K vocab + the B =
+32 batch. The CSR gather (the B lanes gather their CSR rows in parallel) is
+the AVX-512 VGATHER (the fearless_simd kernel!, the next increment).
+
 ### The PDA mask ops (the CSR vs the linear, the pass-through)
 Measured on the nested tool-call-style CFG (the 4 nonterminals, the 7
 terminals, the bounded stack) via `benches/pda_mask_bench.rs` (the release
@@ -67,7 +77,7 @@ sort fix). The per-step PDA cost (the mask + the advance) is O(1) in the input
 length (the bounded config space), so it is flat as the decode grows (the no
 unbounded item-set growth).
 
-## The test suite (the 62 tests + the 1 doc-test)
+## The test suite (the 72 tests + the 1 doc-test)
 
 - The {a^n b^n} DPDA: the accepts ab/aabb/aaabbb, the rejects aab/abab.
 - The RTN compilation: the kappa(G) exact (the heterogeneous grammars), the
