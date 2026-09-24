@@ -8,6 +8,12 @@ repository = "https://github.com/sempervictus/pushdown-rs"
 keywords = ["pushdown", "pda", "dpda", "automata", "grammar", "constrained-decoding"]
 categories = ["compilers", "science"]
 
+# Standalone workspace root: this crate is checked out for development inside
+# the llguidance tree (the .pushdown-rs) but builds independently. The empty
+# [workspace] table keeps it out of the parent workspace so `cargo test` here
+# runs the crate's own suite (the 54 proofs + the benches).
+[workspace]
+
 # the local benchmark fixtures (the the 248K tokenizer + the grammar samples) are
 # dev-only; they are not part of the published package.
 exclude = [
@@ -52,3 +58,7 @@ required-features = ["simd"]
 name = "modality_bench"
 harness = false
 required-features = ["simd"]
+
+[[bench]]
+name = "pda_mask_bench"
+harness = false

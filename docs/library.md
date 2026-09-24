@@ -16,8 +16,11 @@ The common Pda trait is the 7-tuple (Q, Sigma, Gamma, delta, q0, Z0, F):
    +-- EpsilonPda    the marker (the machine has the epsilon transitions)
    +-- FinalStatePda the marker (the acceptance by the F)
    +-- EmptyStackPda the marker (the acceptance by the empty stack)
-   +-- VisiblyPushdown the is_call/is_return/is_internal (the VPA)
-   +-- AlternatingPda  the marker (the AND/OR branching)
++-- VisiblyPushdown the is_call/is_return/is_internal (the VPA)
+    +-- DisplacementPda the is_passthrough/passthrough_run/displacement/
+    |   displacement_partition/accepts_via_eps (the CFGzip Theorem 2, the
+    |   "no control edge" signal + the displacement equivalence bridge)
+    +-- AlternatingPda  the marker (the AND/OR branching)
    +-- OneWayStack     the marker (the stack head moves only down)
    +-- NestedStack     the marker (the stack holds sub-stacks)
    +-- PdaStream       the step_batch/mask_batch/project_batch (the batched pipeline node)
@@ -68,15 +71,53 @@ The key groups:
    transition lookups per state (instead of O(total_transitions) linear scan).
    The step_batch / the project_batch use it.
 - The mask_at_cfg(q, stack) - the single-config epsilon-closure mask (the
-  allowed inputs reachable via the epsilon moves); exactly the set for which
-  advance_eps succeeds (the proof_mask_batch_consistent_with_advance_eps).
-  The batched form is mask_batch.
+   allowed inputs reachable via the epsilon moves); exactly the set for which
+   advance_eps succeeds (the proof_mask_batch_consistent_with_advance_eps).
+   The batched form is mask_batch. CSR-based (the O(counts[q]) scan of q's
+   transitions, the sorted-by-q array) with the linear fallback (the hand-built
+   machines, the no CSR). The proof_mask_at_cfg_csr_equals_linear gates it.
+- The mask_at_cfg_settled(q, top) - the precise settled mask (the EXACT inputs
+    with a defined transition at (q, a, top), the no epsilon-closure). CSR-based
+    (the O(counts[q]) scan) with the linear fallback. The proof_mask_settled_csr_
+    equals_linear gates it. This is the O(1-3) settled mask (the PDA-as-mask-
+    source, the no closure).
+- The is_passthrough(q, top, a) - the "no control edge" signal: true iff the
+    input a at (q, top) is a stack-preserving terminal shift (the push == [top],
+    the no call / return / choice / exit). This is the linear-run (the pass-
+    through) case. CSR-based. The proof_is_passthrough_sound gates it.
+- The passthrough_run(q) - the number of consecutive pass-through shifts from q
+    (the linear-run length). The run is bounded by the production length (the
+    six-property "bounded control"), never the input length. The proof_
+    passthrough_run_exact gates it.
+- The CSR sort invariant: the transitions are sorted by (q, a, top) at
+   construction (the compile + the new), so the CSR (the ctrl_offsets + the
+   ctrl_counts, the first-occurrence + count) is VALID (each state's transitions
+   are contiguous). The proof_csr_is_valid gates it. This is the fix for the
+   scattered q_in states (the multiple productions) that broke the CSR before.
 - The step_batch / the mask_batch / the project_batch - the PdaStream (the
   batched pipeline node).
 - The step_batch_into / the step_batch_simd / the project_batch_simd - the
   no-alloc + the SIMD variants.
+- The is_passthrough(q, top, a) - the "no control edge" signal: true iff the
+   input a at (q, top) is a stack-preserving shift (the identity-stack
+   move, the pass-through). The DisplacementPda trait method.
+- The passthrough_run(q) - the linear-run length from q (the number of
+   consecutive pass-through shifts before the next control edge). Bounded by
+   the production length (the six-property "bounded control"). The
+   DisplacementPda trait method.
+- The displacement(t) - the set of (in_config, out_config) pairs such that
+   out_config is reachable from in_config by consuming the terminal sequence t
+   (the CFGzip Theorem 2 primitive, the pure context-free stack-transformation
+   function). The DisplacementPda trait method.
+- The displacement_partition(sequences) - the bridge: group terminal sequences
+   by their displacement (the displacement equivalence classes, the
+   interchangeable tokens). The DisplacementPda trait method.
+- The accepts_via_eps(q, stack) - whether the config (q, stack) can reach an
+   accepting state via epsilon moves only (the final-state acceptance
+   criterion at the config level, the correct EOS check). The DisplacementPda
+   trait method.
 - The to_bitvec / the from_bitvec - the lossless POD encoding (the state_provenance
-  is the trailing optional suffix).
+   is the trailing optional suffix).
 
 ## The compilation (the compile.rs)
 

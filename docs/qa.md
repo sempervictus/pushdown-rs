@@ -48,7 +48,26 @@ The device PDA (the step_batch) is slower than the scalar at small batch
 (the per-item Vec allocation). The step_batch_into (the no-alloc) + the
 step_batch_simd close this gap.
 
-## The test suite (the 46 tests + the 1 doc-test)
+### The PDA mask ops (the CSR vs the linear, the pass-through)
+Measured on the nested tool-call-style CFG (the 4 nonterminals, the 7
+terminals, the bounded stack) via `benches/pda_mask_bench.rs` (the release
+build):
+
+| Op | time | note |
+|---|---|---|
+| The csr_settled (the mask_at_cfg_settled) | ~8.5 ns | the O(1-3) settled mask |
+| The linear_settled_ref (the independent scan) | ~2.36 us | the O(num_inputs x total) |
+| The csr_epsilon_closure (the mask_at_cfg) | ~140 ns | the closure union |
+| The advance_eps | ~212 ns | the lockstep step |
+| The passthrough_run | ~2.8 ns | the linear-run length |
+| The project_batch (the 1024 drafts) | ~1.33 ms | ~1.3 us per draft |
+
+The CSR settled mask is ~278x faster than the independent linear scan (the
+sort fix). The per-step PDA cost (the mask + the advance) is O(1) in the input
+length (the bounded config space), so it is flat as the decode grows (the no
+unbounded item-set growth).
+
+## The test suite (the 62 tests + the 1 doc-test)
 
 - The {a^n b^n} DPDA: the accepts ab/aabb/aaabbb, the rejects aab/abab.
 - The RTN compilation: the kappa(G) exact (the heterogeneous grammars), the
@@ -95,5 +114,27 @@ step_batch_simd close this gap.
   over the 4-terminal alphabet, the length 0..=6), the
   the_ebpf_language_matches_the_walker_oracle (the PDA == the independent
   call-depth walker, the curated boundary cases).
+- The CSR validity (the proof_csr_is_valid): the sorted-by-q array makes the
+  first-occurrence + count range EXACT (every record in the range has t.q == q,
+  the count equals q's total) over the scattered q_in grammar (the multiple
+  productions). The regression gate for the sort fix.
+- The settled-mask CSR == the linear reference (the proof_mask_settled_csr_
+  equals_linear): the O(1-3) mask_at_cfg_settled equals the order-independent
+  scan over the full (q, top) space (the inclusive + the exclusive at every
+  position).
+- The epsilon-closure mask CSR == the linear reference (the proof_mask_at_cfg_
+  csr_equals_linear): the mask_at_cfg equals the order-independent closure over
+  the reachable config space (the BFS via advance_eps, the bounded stack).
+- The pass-through soundness (the proof_is_passthrough_sound): the
+  is_passthrough(q, top, a) holds iff an identity-stack input-consuming record
+  exists (the independent linear scan, the NOT the CSR) over the full (q, top, a)
+  space (the inclusive + the exclusive).
+- The run exactness (the proof_passthrough_run_exact): the passthrough_run(q)
+  equals the consecutive pass-through shifts (the independent linear chain-
+  follow) over every q (the bounded by the production length).
+- The scattered-choice regression (the proof_advance_eps_scattered_choice): the
+  advance_eps + the mask handle the q_in with multiple productions (the S -> a S
+  b | eps), and the language still matches the independent CFG oracle (the sort
+  is a reordering, the language is unchanged).
 
-Run: `cargo test` (the 54 tests + the 1 doc-test, the all green).
+Run: `cargo test` (the 62 tests + the 1 doc-test, the all green).

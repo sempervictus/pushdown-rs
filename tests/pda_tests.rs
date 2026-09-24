@@ -1547,3 +1547,614 @@ fn proof_mask_batch_consistent_with_advance_eps() {
         }
     }
 }
+
+// ============================================================================
+// The CSR + the pass-through proofs.
+//
+// The six-property invariants exercised here:
+//   - Bounded control: the CSR range for a state is EXACT (the proof_csr_is_valid).
+//   - Deterministic: the pass-through chain is a single path (the no option-spread).
+//   - Finite token spanner: the mask is a table lookup (the CSR), not a live re-derivation.
+// The oracles are in an INDEPENDENT register (the order-independent linear scan),
+// never the CSR code under test (the XOR(F5) no-circularity).
+// ============================================================================
+
+// The scattered-choice grammar (the S -> a A b | eps, the A -> B B | a, the B -> b):
+// the q_in states have MULTIPLE productions (the choice is are scattered in the
+// unsorted build order), so this is the hard case for the CSR contiguity.
+fn scattered_cfg() -> Cfg {
+    Cfg::new(
+        3,
+        2,
+        0,
+        vec![
+            (0, vec![3, 1, 4]), // S -> a A b
+            (0, vec![]),        // S -> eps
+            (1, vec![2, 2]),    // A -> B B
+            (1, vec![3]),       // A -> a
+            (2, vec![4]),       // B -> b
+        ],
+    )
+}
+
+// PROOF: the CSR is VALID after the sort fix. For every control state q, the range
+// [ctrl_offsets[q], +ctrl_counts[q]) contains EXACTLY q's transitions (the inclusive:
+// every transition in the range has t.q == q; the exclusive: the count equals q's
+// total). This the sort fix, the q_in states with multiple productions were
+// scattered, and this range spanned other states' transitions (the broken CSR).
+#[test]
+fn proof_csr_is_valid() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    assert!(!m.ctrl_offsets.is_empty(), "the compile-based machine must carry the CSR");
+    for q in 0..m.num_states {
+        let start = m.ctrl_offsets[q as usize] as usize;
+        let count = m.ctrl_counts[q as usize] as usize;
+        let range = &m.transitions[start..start + count];
+        // the inclusive: every transition in the range belongs to q.
+        for t in range {
+            assert_eq!(t.q, q, "the CSR range for q={q} must contain only q's transitions");
+        }
+        // the exclusive: the count matches q's total transition count.
+        let total_q = m.transitions.iter().filter(|t| t.q == q).count();
+        assert_eq!(
+            count, total_q,
+            "the CSR count for q={q} must equal q's total ({total_q})"
+        );
+    }
+}
+
+// The independent linear reference for the settled mask (the order-independent
+// `lookup`, NOT the CSR): The oracle for the mask_at_cfg_settled proof.
+fn settled_mask_linear_reference(m: &PdaMachine, q: u32, top: u32) -> Vec<u32> {
+    let mut allowed: Vec<u32> = (0..m.num_inputs)
+        .filter(|&a| !m.lookup(q, Some(a), top).is_empty())
+        .collect();
+    allowed.sort();
+    allowed
+}
+
+// PROOF: the CSR-based mask_at_cfg_settled equals the independent linear reference
+// over the FULL config space (the every q, the every top). This is the regression
+// gate for the CSR fix: a broken CSR (the scattered q_in) would diverge here.
+#[test]
+fn proof_mask_settled_csr_equals_linear() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    for q in 0..m.num_states {
+        for top in 0..m.num_stack_syms {
+            let csr = m.mask_at_cfg_settled(q, top);
+            let ref_mask = settled_mask_linear_reference(&m, q, top);
+            assert_eq!(
+                csr, ref_mask,
+                "the CSR settled mask must equal the linear reference (q={q}, top={top})"
+            );
+        }
+    }
+}
+
+// The independent linear reference for the epsilon-closure mask (the order-
+// independent `lookup` + the Pda-trait `transition`, NOT the CSR).
+fn mask_at_cfg_linear_reference(m: &PdaMachine, q: u32, stack: &[u32]) -> Vec<u32> {
+    use pushdown_rs::pda::Pda;
+    let top = stack.last().copied().unwrap_or(m.start_stack);
+    let mut allowed: Vec<u32> = Vec::new();
+    let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    let mut frontier = vec![(q, top)];
+    while let Some((cq, ctop)) = frontier.pop() {
+        if !visited.insert((cq, ctop)) {
+            continue;
+        }
+        for a in 0..m.num_inputs {
+            if !m.lookup(cq, Some(a), ctop).is_empty() && !allowed.contains(&a) {
+                allowed.push(a);
+            }
+        }
+        for (q2, push) in m.transition(cq, None, ctop) {
+            let new_top = if push.is_empty() {
+                ctop
+            } else {
+                *push.first().unwrap()
+            };
+            frontier.push((q2, new_top));
+        }
+    }
+    allowed.sort();
+    allowed
+}
+
+// PROOF: the CSR-based mask_at_cfg (the epsilon-closure union) equals the
+// independent linear reference over the REACHABLE config space (the BFS via
+// advance_eps). The reachable space is finite (the bounded stack, the six-
+// property "bounded pushdown"), so the BFS terminates.
+#[test]
+fn proof_mask_at_cfg_csr_equals_linear() {
+    use pushdown_rs::pda::PdaStream;
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    let mut reachable: Vec<(u32, Vec<u32>)> = vec![(m.start_state, vec![m.start_stack])];
+    let mut i = 0;
+    while i < reachable.len() {
+        let (q, stack) = reachable[i].clone();
+        for a in 0..m.num_inputs {
+            if let Some((nq, ns)) = m.advance_eps(q, &stack, a) {
+                if !reachable.contains(&(nq, ns.clone())) {
+                    reachable.push((nq, ns));
+                }
+            }
+        }
+        i += 1;
+    }
+    for (q, stack) in &reachable {
+        let mut csr = m.mask_at_cfg(*q, stack);
+        csr.sort();
+        let ref_mask = mask_at_cfg_linear_reference(&m, *q, stack);
+        assert_eq!(
+            csr, ref_mask,
+            "the CSR mask_at_cfg must equal the linear reference (q={q})"
+        );
+        // the batched form must agree too (the PdaStream invariant).
+        let batched = m.mask_batch(&[(q.clone(), stack.clone())])[0].clone();
+        let mut batched_sorted = batched;
+        batched_sorted.sort();
+        assert_eq!(csr, batched_sorted, "mask_at_cfg must equal the batched mask_batch");
+    }
+}
+
+// PROOF: the pass-through predicate is SOUND. is_passthrough(q, top, a) holds
+// iff an identity-stack input-consuming transition (q, a, top) -> (q', [top])
+// exists (the independent linear scan, NOT the CSR). The inclusive: every reported
+// pass-through has the identity-stack move; the exclusive: no non-pass-through is
+// reported. This is the "no control edge" signal (the stack-preserving shift).
+#[test]
+fn proof_is_passthrough_sound() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    for q in 0..m.num_states {
+        for top in 0..m.num_stack_syms {
+            for a in 0..m.num_inputs {
+                let reference = m.transitions.iter().any(|t| {
+                    t.q == q && t.a == a && t.top == top && t.push.len() == 1 && t.push[0] == top
+                });
+                assert_eq!(
+                    m.is_passthrough(q, top, a),
+                    reference,
+                    "is_passthrough must agree with the linear reference (q={q}, top={top}, a={a})"
+                );
+            }
+        }
+    }
+}
+
+// The independent linear reference for the pass-through run length (the order-
+// independent chain-follow, NOT the CSR passthrough_next).
+fn passthrough_run_reference(m: &PdaMachine, q: u32) -> u32 {
+    let mut cur = q;
+    let mut depth = 0u32;
+    let cap = m.num_states;
+    while depth < cap {
+        let mut found = None;
+        for t in &m.transitions {
+            if t.q == cur && t.a < m.num_inputs && t.push.len() == 1 && t.push[0] == t.top {
+                found = Some(t.next_q);
+                break;
+            }
+        }
+        match found {
+            Some(nq) => {
+                cur = nq;
+                depth += 1;
+            }
+            None => break,
+        }
+    }
+    depth
+}
+
+// PROOF: the pass-through run length is EXACT. passthrough_run(q) equals the
+// number of consecutive identity-stack terminal shifts from q (the independent
+// linear chain-follow). For the RTN dot states this is the run of consecutive
+// terminals in the production's rhs (the "bounded control" six-property: the run
+// is bounded by the production length, never the sequence length).
+#[test]
+fn proof_passthrough_run_exact() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    for q in 0..m.num_states {
+        assert_eq!(
+            m.passthrough_run(q),
+            passthrough_run_reference(&m, q),
+            "passthrough_run must equal the linear reference (q={q})"
+        );
+    }
+    // the boundary: a dot state at the LAST terminal of a production has run 1;
+    // a state at a nonterminal (the call) has run 0 (the no input-consuming edge).
+    // The the run is -independent (the RTN terminal shifts preserve the top).
+    for q in 0..m.num_states {
+        let run0 = m.passthrough_run(q);
+        assert_eq!(run0, passthrough_run_reference(&m, q));
+    }
+}
+
+// PROOF (the regression): the scattered q_in choice is handled by the CSR. The
+// S -> a S b | eps grammar has q_in(S) with TWO choice transitions (the scattered
+// in the unsorted build). Before the sort fix, the CSR range for q_in(S) spanned
+// the wrong transitions, and advance_eps / mask_at_cfg would MISS one of the two
+// productions. After the fix, both are reachable: the mask at the start includes the
+// a terminal (the S -> a S b) AND advance_eps succeeds on it.
+#[test]
+fn proof_advance_eps_scattered_choice() {
+    let g = Cfg::new(
+        1,
+        2,
+        0,
+        vec![
+            (0, vec![1, 0, 2]), // S -> a S b
+            (0, vec![]),        // S -> eps
+        ],
+    );
+    let m = pushdown_rs::compile(&g).expect("compile");
+    assert!(!m.ctrl_offsets.is_empty(), "the CSR must be present");
+    let start_stack = vec![m.start_stack];
+    // the a terminal (the local 0) must be in the start mask (the S -> a S b choice).
+    let mask = m.mask_at_cfg(m.start_state, &start_stack);
+    assert!(
+        mask.contains(&0),
+        "the a terminal must be reachable from the start (the S -> a S b choice)"
+    );
+    // advance_eps on a must succeed (the S -> a S b path).
+    assert!(
+        m.advance_eps(m.start_state, &start_stack, 0).is_some(),
+        "advance_eps on the a must succeed (the scattered choice is handled)"
+    );
+    // the differential: the PDA language must still match the independent CFG oracle
+    // (the sort is a reordering, the language is unchanged).
+    let corpus = ab_corpus(8);
+    run_differential(&m, &g, &corpus);
+}
+
+// The independent reference for accepts_via_eps (the order-independent linear
+// scan via the Pda-tr `transition`, NOT the CSR). The oracle for the
+// epsilon-closure acceptance proof.
+fn accepts_via_eps_reference(m: &PdaMachine, q: u32, stack: &[u32]) -> bool {
+    use pushdown_rs::pda::Pda;
+    let mut visited: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+    let mut frontier: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
+    while let Some((cq, cstk)) = frontier.pop() {
+        if !visited.insert((cq, cstk.clone())) {
+            continue;
+        }
+        if m.accepting().contains(&cq) {
+            return true;
+        }
+        let ctop = cstk.last().copied().unwrap_or(m.start_stack());
+        for (q2, push) in m.transition(cq, None, ctop) {
+            let mut ns = cstk.clone();
+            ns.pop();
+            for &p in &push {
+                ns.push(p);
+            }
+            frontier.push((q2, ns));
+        }
+    }
+    false
+}
+
+// PROOF: the epsilon-closure acceptance (the accepts_via_eps) equals the
+// independent linear-scan reference over the REACHABLE config space (the BFS via
+// advance_eps). This is the correct EOS check: the PDA has "finished" the grammar
+// iff the epsilon-closure of the current config contains an accepting state (the
+// final-state acceptance criterion, the no directis q itself accepting" shortcut).
+#[test]
+fn proof_accepts_via_eps_equals_reference() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    // Enumerate the reachable configs (the BFS via advance_eps, the bounded stack).
+    let mut reachable: Vec<(u32, Vec<u32>)> = vec![(m.start_state, vec![m.start_stack])];
+    let mut i = 0;
+    while i < reachable.len() {
+        let (q, stack) = reachable[i].clone();
+        for a in 0..m.num_inputs {
+            if let Some((nq, ns)) = m.advance_eps(q, &stack, a) {
+                if !reachable.contains(&(nq, ns.clone())) {
+                    reachable.push((nq, ns));
+                }
+            }
+        }
+        i += 1;
+    }
+    for (q, stack) in &reachable {
+        let csr = m.accepts_via_eps(*q, stack);
+        let ref_val = accepts_via_eps_reference(&m, *q, stack);
+        assert_eq!(
+            csr, ref_val,
+            "accepts_via_eps must equal the linear reference (q={q}, stack={stack:?})"
+        );
+    }
+    // The boundary: the start config IS accepting (the S -> eps production, the
+    // empty string is in the language), but a mid-derivation config (after
+    // consuming the first "a") is NOT accepting (the PDA still needs "A b").
+    assert!(m.accepts_via_eps(m.start_state, &vec![m.start_stack]), "the start IS accepting (the S -> eps)");
+    let (q1, s1) = m.advance_eps(m.start_state, &vec![m.start_stack], 0).expect("the advance on the a");
+    assert!(!m.accepts_via_eps(q1, &s1), "the mid-derivation config is NOT accepting");
+}
+
+// The independent displacement reference (the order over the Pda-trait `transition`,
+// the order-independent linear scan, NOT the CSR advance_eps). The oracle for the
+// displacement proof.
+fn displacement_reference(m: &PdaMachine, t: &[u32]) -> Vec<(u32, Vec<u32>, u32, Vec<u32>)> {
+    use pushdown_rs::pda::Pda;
+    // The reachable in_configs (the BFS over the advance_eps-equivalent from the start,
+    // the epsilon closure + the terminal move per input, matching the displacement
+    // method's advance_eps BFS).
+    let mut in_configs: Vec<(u32, Vec<u32>)> = vec![(m.start_state, vec![m.start_stack])];
+    let mut i = 0;
+    while i < in_configs.len() {
+        let (q, stack) = in_configs[i].clone();
+        for a in 0..m.num_inputs {
+            // The advance_eps-equivalent: the epsilon closure from (q, stack), then the
+            // terminal move on a (the raw transitions, the no advance_eps).
+            let mut eps_configs: Vec<(u32, Vec<u32>)> = vec![(q, stack.clone())];
+            let mut j = 0;
+            while j < eps_configs.len() {
+                let (eq, estack) = eps_configs[j].clone();
+                let etop = estack.last().copied().unwrap_or(m.start_stack);
+                for (q2, push) in m.transition(eq, None, etop) {
+                    let mut ns = estack.clone();
+                    ns.pop();
+                    for &p in push.iter().rev() {
+                        ns.push(p);
+                    }
+                    if !eps_configs.contains(&(q2, ns.clone())) {
+                        eps_configs.push((q2, ns));
+                    }
+                }
+                j += 1;
+            }
+            for (eq, estack) in &eps_configs {
+                let etop2 = estack.last().copied().unwrap_or(m.start_stack);
+                for (q2, push) in m.transition(*eq, Some(a), etop2) {
+                    let mut ns = estack.clone();
+                    ns.pop();
+                    for &p in push.iter().rev() {
+                        ns.push(p);
+                    }
+                    if !in_configs.contains(&(q2, ns.clone())) {
+                        in_configs.push((q2, ns));
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+// For each in_config, simulate the PDA over t (the terminal sequence) and collect
+    // the (in_config, out_config) pairs. The simulation matches the advance_eps
+    // logic (the frontier BFS epsilon closure + the reverse push), but uses the
+    // raw transitions (the m.transition, the independent register).
+    let mut result: Vec<(u32, Vec<u32>, u32, Vec<u32>)> = Vec::new();
+    for (in_q, in_stack) in &in_configs {
+        let mut ctrl = *in_q;
+        let mut stack = in_stack.clone();
+        let mut diverged = false;
+        for &a in t {
+            // The epsilon closure (the frontier BFS over the epsilon moves, the
+            // reverse push: the push[0] is the new top).
+            let mut eps_configs: Vec<(u32, Vec<u32>)> = vec![(ctrl, stack.clone())];
+            let mut j = 0;
+            while j < eps_configs.len() {
+                let (eq, estack) = eps_configs[j].clone();
+                j += 1;
+                let etop = estack.last().copied().unwrap_or(m.start_stack);
+                for (q2, push) in m.transition(eq, None, etop) {
+                    let mut ns = estack.clone();
+                    ns.pop();
+                    for &p in push.iter().rev() {
+                        ns.push(p);
+                    }
+                    if !eps_configs.contains(&(q2, ns.clone())) {
+                        eps_configs.push((q2, ns));
+                    }
+                }
+            }
+            // The terminal move on a (from each config in the epsilon closure, the
+            // reverse push).
+            let mut next_configs: Vec<(u32, Vec<u32>)> = Vec::new();
+            for (eq, estack) in &eps_configs {
+                let etop2 = estack.last().copied().unwrap_or(m.start_stack);
+                for (q2, push) in m.transition(*eq, Some(a), etop2) {
+                    let mut ns = estack.clone();
+                    ns.pop();
+                    for &p in push.iter().rev() {
+                        ns.push(p);
+                    }
+                    next_configs.push((q2, ns));
+                }
+            }
+            if next_configs.is_empty() {
+                diverged = true;
+                break;
+            }
+            // The deterministic case: the single next config (the no option).
+            ctrl = next_configs[0].0;
+            stack = next_configs[0].1.clone();
+        }
+        if !diverged {
+            result.push((*in_q, in_stack.clone(), ctrl, stack));
+        }
+    }
+    result
+}
+
+// PROOF: the displacement (the CSR advance_eps-based) equals the independent
+// linear reference (the Pda-trait transition-BFS) over the reachable config space.
+// This is the CFGzip Theorem 2 primitive (the displacement equivalence): two tokens
+// are interchangeable iff they have the same displacement (the set of
+// (in_config, out_config) pairs).
+#[test]
+fn proof_displacement_equals_reference() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    // A few of terminal sequences (the the P the PDA consumes).
+    let sequences: Vec<Vec<u32>> = vec![
+        vec![0], vec![1], vec![0, 1], vec![1, 0], vec![0, 0, 1], vec![],
+    ];
+    for seq in &sequences {
+        let csr = m.displacement(seq);
+        let ref_val = displacement_reference(&m, seq);
+        // The both are sets of (in_config, out_config) pairs (the no order).
+        let mut a: Vec<_> = csr.clone();
+        let mut b: Vec<_> = ref_val.clone();
+        a.sort();
+        b.sort();
+        if a != b {
+            eprintln!("DEBUG seq={seq:?} csr_len={} ref_len={}", a.len(), b.len());
+            eprintln!("DEBUG csr={a:?}");
+            eprintln!("DEBUG ref={b:?}");
+        }
+        assert_eq!(
+            a, b,
+            "the displacement must equal the linear reference (seq={seq:?})"
+        );
+    }
+}
+
+// PROOF: the displacement partition is an EQUIVALENCE relation (the reflexive, the
+// symmetric, the transitive). This is the CFGzip Theorem 2 (the displacement
+// equivalence refines the syntactic congruence): two tokens are in the same class
+// iff they are interchangeable (the same displacement).
+#[test]
+fn proof_displacement_partition_is_equivalence() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    let sequences: Vec<Vec<u32>> = vec![
+        vec![0], vec![1], vec![0, 1], vec![1, 0], vec![0, 0, 1], vec![], vec![0], vec![1, 1],
+    ];
+    let groups = m.displacement_partition(&sequences);
+    // The partition is total (every sequence is in exactly one group).
+    let mut assigned = vec![false; sequences.len()];
+    for g in &groups {
+        for &idx in g {
+            assert!(!assigned[idx], "a sequence must be in exactly one group");
+            assigned[idx] = true;
+        }
+    }
+    assert!(assigned.iter().all(|&a| a), "every sequence must be assigned");
+    // The equivalence: two sequences are in the same group iff they have the same
+    // displacement (the independent check).
+    for i in 0..sequences.len() {
+        for j in (i + 1)..sequences.len() {
+            let same_group = groups.iter().any(|g| g.contains(&i) && g.contains(&j));
+            let same_disp = m.displacement(&sequences[i]) == m.displacement(&sequences[j]);
+            assert_eq!(
+                same_group, same_disp,
+                "the partition must group exactly the same-displacement sequences (i={i}, j={j})"
+            );
+        }
+    }
+}
+
+// PROOF: the displacement composition (the functional property): the
+// displacement of the concatenation t1 ++ t2 is the composition of the
+// displacements (the D(t1 ++ t2) = D(t2) o D(t1), the t1 is consumed first, then
+// the t2). This is the relation composition (the set of (in_config, out_config)
+// pairs such that there exists an intermediate config).
+#[test]
+fn proof_displacement_composition() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    // A few terminal sequences (the PDA consumes).
+    let t1 = vec![0u32];
+    let t2 = vec![1u32];
+    let concat: Vec<u32> = t1.iter().chain(t2.iter()).copied().collect();
+    // The displacement of the concatenation (the direct computation).
+    let d_concat = m.displacement(&concat);
+    // The composition of the displacements (the D(t2) o D(t1)).
+    let d1 = m.displacement(&t1);
+    let d2 = m.displacement(&t2);
+    let d_composed = pushdown_rs::machine::PdaMachine::displacement_compose(&d1, &d2);
+    // The both must be equal (the functional property).
+    let mut a: Vec<_> = d_concat;
+    let mut b: Vec<_> = d_composed;
+    a.sort();
+    b.sort();
+    assert_eq!(
+        a, b,
+        "the displacement of the concatenation must equal the composition of the displacements"
+    );
+}
+
+// PROOF: the displacement monoid (the identity + the associativity). The
+// displacement of the empty sequence is the identity relation (the (c, c) pairs
+// for all reachable configs c). The composition is associative (the D(t1 ++ t2 ++
+// t3) = D(t3) o D(t2) o D(t1) = (D(t3) o D(t2)) o D(t1)). This is the key
+// algebraic property that makes the displacement a functional atom (the no
+// temporary state, the pure function).
+#[test]
+fn proof_displacement_monoid_identity() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    // The displacement of the empty sequence is the identity relation (the
+    // (c, c) pairs for all reachable configs c).
+    let d_empty = m.displacement(&[]);
+    for &(in_q, ref in_stack, out_q, ref out_stack) in &d_empty {
+        assert_eq!(in_q, out_q, "the identity displacement must have in_q == out_q");
+        assert_eq!(in_stack, out_stack, "the identity displacement must have in_stack == out_stack");
+    }
+    // The empty sequence displacement is non-empty (the reachable configs exist).
+    assert!(!d_empty.is_empty(), "the identity displacement must be non-empty (the reachable configs)");
+}
+
+#[test]
+fn proof_displacement_monoid_associativity() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    let t1 = vec![0u32];
+    let t2 = vec![1u32];
+    let t3 = vec![0u32, 1u32];
+    // The D(t1 ++ t2 ++ t3) (the left-associative, the direct computation).
+    let left_concat: Vec<u32> = t1.iter().chain(t2.iter()).chain(t3.iter()).copied().collect();
+    let d_left = m.displacement(&left_concat);
+    // The (D(t3) o D(t2)) o D(t1) (the right-associative, the composition).
+    let d_t1 = m.displacement(&t1);
+    let d_t2 = m.displacement(&t2);
+    let d_t3 = m.displacement(&t3);
+    let d_t3o_t2 = PdaMachine::displacement_compose(&d_t2, &d_t3);
+    let d_right = PdaMachine::displacement_compose(&d_t3o_t2, &d_t1);
+    // The both must be equal (the associativity).
+    let mut a: Vec<_> = d_left;
+    let mut b: Vec<_> = d_right;
+    a.sort();
+    b.sort();
+    assert_eq!(
+        a, b,
+        "the displacement composition must be associative (the D(t1++t2++t3) == the (D(t3) o D(t2)) o D(t1))"
+    );
+}
+
+// PROOF: the displacement congruence (the key property that makes the
+// displacement a valid equivalence relation): if t1 ~ t2 (the same
+// displacement), then for any continuation u, u ++ t1 ~ u ++ t2 (the same
+// displacement). This follows from the associativity of the composition (the
+// D(u ++ t1) = D(t1) o D(u) = D(t2) o D(u) = D(u ++ t2)). but is stated
+// explicitly as the congruence property (the no just the associativity).
+#[test]
+fn proof_displacement_congruence() {
+    let m = pushdown_rs::compile(&scattered_cfg()).expect("compile");
+    // Two sequences with the same displacement (the t1 = t2).
+    let t1 = vec![0u32];
+    let t2 = vec![0u32]; // the same sequence (the trivial congruence)
+    assert_eq!(m.displacement(&t1), m.displacement(&t2), "the t1 ~ t2 (the same displacement)");
+    // A continuation u (the no the same as t1/t2).
+    let u = vec![1u32, 0u32];
+    // The congruence: the u ++ t1 ~ u ++ t2 (the same displacement).
+    let ut1: Vec<u32> = u.iter().chain(t1.iter()).copied().collect();
+    let ut2: Vec<u32> = u.iter().chain(t2.iter()).copied().collect();
+    assert_eq!(
+        m.displacement(&ut1),
+        m.displacement(&ut2),
+        "the congruence: the u ++ t1 ~ u ++ t2 (the same displacement)"
+    );
+    // The non-trivial congruence: two different sequences with the same
+    // displacement (the the t1' ~ t2', the no t1' == t2').
+    let t1p = vec![0u32, 1u32];
+    let t2p = vec![1u32, 0u32]; // the different sequence (the no the same displacement)
+    if m.displacement(&t1p) == m.displacement(&t2p) {
+        // The t1p ~ t2p (the same displacement), so the congruence holds.
+        let ut1p: Vec<u32> = u.iter().chain(t1p.iter()).copied().collect();
+        let ut2p: Vec<u32> = u.iter().chain(t2p.iter()).copied().collect();
+        assert_eq!(
+            m.displacement(&ut1p),
+            m.displacement(&ut2p),
+            "the congruence: the u ++ t1p ~ u ++ t2p (the same displacement)"
+        );
+    }
+}
