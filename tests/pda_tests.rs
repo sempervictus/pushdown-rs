@@ -2161,3 +2161,29 @@ fn proof_displacement_congruence() {
         );
     }
 }
+
+// The displacement is the BFS over the reachable in_configs (the ground truth,
+// the no single-path shortcut). This is the regression gate for the GNF bridge
+// grouping optimization (the displacement is a function of the byte sequence,
+// the no the token ID, so it is computed once per unique byte-sequence).
+#[test]
+fn proof_displacement_is_bfs() {
+    let g = Cfg::new(
+        2, // S, T
+        3, // a, b, c
+        0, // start = S
+        vec![
+            (0, vec![2, 1, 3]), // S -> a T b (the 2=a, the 1=T, the 3=b)
+            (1, vec![4]),       // T -> c (the 4=c)
+        ],
+    );
+    let m = pushdown_rs::compile(&g).expect("compile");
+    // The displacement of the empty sequence is the identity relation (the
+    // (in_config, in_config) pairs for all reachable in_configs).
+    let d_empty = m.displacement(&[]);
+    for &(in_q, ref in_stack, out_q, ref out_stack) in &d_empty {
+        assert_eq!(in_q, out_q, "the empty displacement must the identity (the in == the out)");
+        assert_eq!(in_stack, out_stack, "the empty displacement is the identity (the in_stack == the out_stack)");
+    }
+    assert!(!d_empty.is_empty(), "the empty displacement is non-empty (the reachable in_configs exist)");
+}
