@@ -134,5 +134,39 @@ fn bench_sequence_length_flat(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_csr_vs_linear_mask, bench_sequence_length_flat);
+    fn bench_dispatched_gather(c: &mut Criterion) {
+    // The dispatched csr_gather (the B lanes in chunks of the SIMD width, the
+    // fearless_simd dispatch!). The B is big (the 256, the 512-bit pipeline
+    // loaded). The independent linear reference is the O(num x total) scan.
+    use pushdown_rs::simd_pipeline::csr_gather;
+    let g = tool_call_cfg();
+    let m = pushdown_rs::compile(&g).expect("compile");
+    let b = 256;
+    let ctrls: Vec<u32> = (0..b).map(|i| (i % m.num_states) as u32).collect();
+    let tops: Vec<u32> = (0..b).map(|i| (i % m.num_stack_syms) as u32).collect();
+
+    fn linear_gather(m: &PdaMachine, ctrls: &[u32], tops: &[u32]) -> Vec<Vec<u32>> {
+        ctrls.iter().zip(tops.iter()).map(|(&q, &top)| {
+            let mut allowed = Vec::new();
+            for a in 0..m.num_inputs {
+                if !m.lookup(q, Some(a), top).is_empty() {
+                    allowed.push(a);
+                }
+            }
+            allowed
+        }).collect()
+    }
+
+    let mut group = c.benchmark_group("pda_gather");
+    group.throughput(Throughput::Elements(b as u64));
+    group.bench_function("dispatched_csr_gather", |it| {
+        it.iter(|| black_box(csr_gather(&m, &ctrls, &tops)))
+    });
+    group.bench_function("linear_gather_ref", |it| {
+        it.iter(|| black_box(linear_gather(&m, &ctrls, &tops)))
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_csr_vs_linear_mask, bench_sequence_length_flat, bench_dispatched_gather);
 criterion_main!(benches);

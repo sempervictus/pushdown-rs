@@ -71,6 +71,9 @@ fn anb_n_dpda() -> PdaMachine {
         vocab_names: None,
         ctrl_offsets: vec![],
         ctrl_counts: vec![],
+    flat_a: vec![],
+    flat_top: vec![],
+    flat_next_q: vec![],
     }
 }
 

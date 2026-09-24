@@ -181,6 +181,11 @@ impl PdaMachine {
                 }
                 counts
             },
+            // The SoA flat arrays (the SIMD-gatherable layout, computed from the
+            // deserialized transitions).
+            flat_a: transitions.iter().map(|t| t.a).collect(),
+            flat_top: transitions.iter().map(|t| t.top).collect(),
+            flat_next_q: transitions.iter().map(|t| t.next_q).collect(),
         };
         m.validate_bounds().map_err(|e| BitvecError::Malformed(e.to_string()))?;
         Ok(m)

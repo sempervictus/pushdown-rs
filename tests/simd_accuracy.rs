@@ -126,6 +126,9 @@ mod simd_accuracy {
             vocab_names: None,
         ctrl_offsets: vec![],
         ctrl_counts: vec![],
+    flat_a: vec![],
+    flat_top: vec![],
+    flat_next_q: vec![],
         };
         let index = machine.build_index();
 
@@ -362,7 +365,59 @@ mod simd_accuracy {
         }
         assert_eq!(
             out, out_ref,
-            "the SimdPipeline maskk_broadcast must be bit-exact vs the scalar reference (the B = {b}, the 512-bit pipeline loaded)"
+            "the SimdPipeline mask_broadcast must be bit-exact vs the scalar reference (the B = {b}, the 512-bit pipeline loaded)"
+        );
+    }
+
+    /// PROOF: the dispatched csr_gather (the B lanes in chunks of the SIMD
+    /// width, the fearless_simd dispatch!) equals the independent linear
+    /// reference (the order-invariant full-array scan) for every (ctrl, top)
+    /// in the batch. This is the batch invariant (the B lanes == the scalar
+    /// per-lane). The B is big (the 64, the 512-bit pipeline loaded).
+    #[test]
+    fn csr_gather_dispatched_equals_linear_reference() {
+        use pushdown_rs::compile::Cfg;
+        use pushdown_rs::simd_pipeline::csr_gather;
+        // A nested CFG (the bounded stack, the DCFL shape, the wide CSR rows).
+        let g = Cfg::new(
+            3,
+            2,
+            0,
+            vec![
+                (0, vec![3, 1, 4]), // S -> a A b
+                (0, vec![]),         // S -> eps
+                (1, vec![2, 2]),    // A -> B B
+                (1, vec![3]),       // A -> a
+                (2, vec![4]),      // B -> b
+            ],
+        );
+        let m = pushdown_rs::compile(&g).expect("compile");
+        assert!(!m.ctrl_offsets.is_empty(), "the CSR must be present");
+        // The B batch (the 64 configs, the 512-bit pipeline loaded).
+        let b = 64;
+        let ctrls: Vec<u32> = (0..b).map(|i| i % m.num_states).collect();
+        let tops: Vec<u32> = (0..b).map(|i| i % m.num_stack_syms).collect();
+        // The dispatched gather (the fearless_simd dispatch!, the B lanes in
+        // chunks of the SIMD width).
+        let dispatched = csr_gather(&m, &ctrls, &tops);
+        // The independent linear reference (the order-invariant full-array scan,
+        // the no CSR, the no SIMD).
+        let reference: Vec<Vec<u32>> = ctrls
+            .iter()
+            .zip(tops.iter())
+            .map(|(&q, &top)| {
+                let mut allowed = Vec::new();
+                for a in 0..m.num_inputs {
+                    if !m.lookup(q, Some(a), top).is_empty() {
+                        allowed.push(a);
+                    }
+                }
+                allowed
+            })
+            .collect();
+        assert_eq!(
+            dispatched, reference,
+            "the dispatched csr_gather must equal the linear reference (the B = {b}, the batch invariant)"
         );
     }
 }

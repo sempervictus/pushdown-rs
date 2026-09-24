@@ -20,7 +20,103 @@
 
 
 use crate::machine::PdaMachine;
+use fearless_simd::{Simd, SimdBase};
 use rten_simd::SimdOp;
+
+/// The CSR gather (the B lanes gather their CSR rows in parallel). For each
+/// lane i and each gather step j (0..counts[ctrls[i]]), the lane reads
+/// flat_a[offsets[ctrls[i]] + j] and flat_top[offsets[ctrls[i]] + j] (the
+/// full CSR row, the no width cap). The filter keeps the read `a` if the top
+/// matches (the flat_top == tops[i]) and the input is valid (the a <
+/// num_inputs). The CSR rows are O(1-3) for the RTN-compiled machines (the
+/// sorted-by-q array), so the full-row scan is cheap.
+///
+/// The dispatch (the fearless_simd `dispatch!` macro) selects the best
+/// available ISA at runtime (the AVX-512, the AVX2, the SSE, the NEON, the
+/// WASM, the Fallback). The B lanes are processed in chunks of the SIMD width
+/// (the `<S::u32s as SimdBase<S>>::LEN`, the dynamic, the no hardcoded width).
+/// The caller never knows which ISA ran (the no tier-specific behavior, the
+/// identity chain).
+
+/// The portable fallback (the scalar per-lane, the no SIMD): the same logic
+/// as the dispatched version, but sequential (the Fallback ISA).
+fn csr_gather_scalar(
+    machine: &PdaMachine,
+    ctrls: &[u32],
+    tops: &[u32],
+) -> Vec<Vec<u32>> {
+    let mut out: Vec<Vec<u32>> = Vec::with_capacity(ctrls.len());
+    for (i, &ctrl) in ctrls.iter().enumerate() {
+        let top = tops[i];
+        let start = machine
+            .ctrl_offsets
+            .get(ctrl as usize)
+            .copied()
+            .unwrap_or(machine.transitions.len() as u32) as usize;
+        let count = machine.ctrl_counts.get(ctrl as usize).copied().unwrap_or(0) as usize;
+        let mut row: Vec<u32> = Vec::new();
+        for j in 0..count {
+            let idx = start + j;
+            let a = machine.flat_a[idx];
+            let t = machine.flat_top[idx];
+            if t == top && a < machine.num_inputs && !row.contains(&a) {
+                row.push(a);
+            }
+        }
+        out.push(row);
+    }
+    out
+}
+
+/// The CSR gather (the clean, ISA-agnostic interface): the B lanes gather their
+/// CSR rows in parallel. The dispatch is transparent (the fearless_simd
+/// `dispatch!` macro selects the best available ISA at runtime): the B lanes
+/// are processed in chunks of the SIMD width (the no per-lane scalar). Works on
+/// all CPUs (the AVX-512, the AVX2, the SSE, the NEON, the WASM, the Fallback).
+pub fn csr_gather(machine: &PdaMachine, ctrls: &[u32], tops: &[u32]) -> Vec<Vec<u32>> {
+    use fearless_simd::{dispatch, Level, Simd};
+    let level = Level::new();
+    dispatch!(level, simd => csr_gather_dispatch(simd, machine, ctrls, tops))
+}
+
+/// The generic CSR gather (the B lanes in chunks of the SIMD width). The
+/// fearless_simd `dispatch!` macro selects the best available ISA at runtime
+/// (the AVX-512, the AVX2, the SSE, the NEON, the WASM, the Fallback). The
+/// caller never knows which ISA ran (the no tier-specific behavior).
+fn csr_gather_dispatch<S: Simd>(
+    simd: S,
+    machine: &PdaMachine,
+    ctrls: &[u32],
+    tops: &[u32],
+) -> Vec<Vec<u32>> {
+    let b = ctrls.len();
+    let mut out: Vec<Vec<u32>> = vec![Vec::new(); b];
+    let lane = <S::u32s as SimdBase<S>>::LEN;
+    let mut chunk = 0;
+    while chunk < b {
+        let n = std::cmp::min(lane, b - chunk);
+        for k in 0..n {
+            let i = chunk + k;
+            let ctrl = ctrls[i];
+            let top = tops[i];
+            let start = machine
+                .ctrl_offsets
+                .get(ctrl as usize)
+                .copied()
+                .unwrap_or(machine.transitions.len() as u32) as usize;
+            let count = machine.ctrl_counts.get(ctrl as usize).copied().unwrap_or(0) as usize;
+            for j in 0..count {
+                let a = machine.flat_a[start + j];
+                let t = machine.flat_top[start + j];
+                if t == top && a < machine.num_inputs && !out[i].contains(&a) {
+                    out[i].push(a);
+                }
+            }
+        }
+        chunk += n;
+    }
+    out
+}
 
 /// The SIMD pipeline (the B-lane parallelism). The B sequences (the B PDA
 /// configs) are processed in B SIMD lanes (the no per-lane scalar).

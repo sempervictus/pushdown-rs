@@ -76,6 +76,14 @@ pub struct PdaMachine {
     /// the end of the array for states with no transitions.
     pub ctrl_offsets: Vec<u32>,
     pub ctrl_counts: Vec<u32>,
+    /// The SoA flat arrays (the SIMD-gatherable layout): the transitions' fields
+    /// are flattened into parallel arrays (the a, the top, the next_q). This is
+    /// the layout the AVX-512 VGATHER (the CSR gather) reads: the B lanes
+    /// gather their flat_a / flat_top values in parallel (the no per-lane scalar).
+    /// Derived data (the computed from the transitions), excluded from equality.
+    pub flat_a: Vec<u32>,
+    pub flat_top: Vec<u32>,
+    pub flat_next_q: Vec<u32>,
 }
 
 // The CSR fields (ctrl_offsets, ctrl_counts) are derived data (computed from
@@ -99,6 +107,21 @@ impl PartialEq for PdaMachine {
 impl Eq for PdaMachine {}
 
 impl PdaMachine {
+    /// Compute the SoA flat arrays (the flat_a, the flat_top, the flat_next_q)
+    /// from the transitions (the SIMD-gatherable layout). This is a static
+    /// helper for construction sites that build PdaMachine directly.
+    pub fn compute_flat_arrays(transitions: &[Transition]) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+        let mut flat_a = Vec::with_capacity(transitions.len());
+        let mut flat_top = Vec::with_capacity(transitions.len());
+        let mut flat_next_q = Vec::with_capacity(transitions.len());
+        for t in transitions {
+            flat_a.push(t.a);
+            flat_top.push(t.top);
+            flat_next_q.push(t.next_q);
+        }
+        (flat_a, flat_top, flat_next_q)
+    }
+
     /// Compute the CSR index (ctrl_offsets + ctrl_counts) from the transitions.
     /// This is a static helper for construction sites that build PdaMachine
     /// directly (not via `PdaMachine::new`).
@@ -153,6 +176,7 @@ impl PdaMachine {
                 ctrl_counts[t.q as usize] += 1;
             }
         }
+        let (flat_a, flat_top, flat_next_q) = Self::compute_flat_arrays(&transitions);
         let m = PdaMachine {
             num_states,
             num_inputs,
@@ -165,6 +189,9 @@ impl PdaMachine {
             vocab_names,
             ctrl_offsets,
             ctrl_counts,
+            flat_a,
+            flat_top,
+            flat_next_q,
         };
         m.validate_bounds()?;
         Ok(m)

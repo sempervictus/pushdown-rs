@@ -81,6 +81,9 @@
 //!     vocab_names: None, // the hand-built machine (the no vocabulary labels)
 //!     ctrl_offsets: vec![], // the no CSR (the linear-scan fallback in advance_eps)
 //!     ctrl_counts: vec![],
+//!     flat_a: vec![],
+//!     flat_top: vec![],
+//!     flat_next_q: vec![],
 //! };
 //! assert!(m.is_deterministic());
 //! assert!(m.accepts_dpda(&[A, B]));

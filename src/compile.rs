@@ -303,6 +303,11 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
             }
             counts
         },
+        // The SoA flat arrays (the SIMD-gatherable layout, computed from the
+        // sorted transitions).
+        flat_a: transitions.iter().map(|t| t.a).collect(),
+        flat_top: transitions.iter().map(|t| t.top).collect(),
+        flat_next_q: transitions.iter().map(|t| t.next_q).collect(),
     })
 }
 

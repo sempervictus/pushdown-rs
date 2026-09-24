@@ -182,6 +182,9 @@ fn main() {
         vocab_names: None,
         ctrl_offsets: vec![],
         ctrl_counts: vec![],
+    flat_a: vec![],
+    flat_top: vec![],
+    flat_next_q: vec![],
     };
     for (name, input, expect) in [
         ("ab", vec![A, B], true),
