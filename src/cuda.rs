@@ -13,6 +13,7 @@
 
 use crate::bitvec::BitvecError;
 use crate::machine::PdaMachine;
+use crate::pda::Dpda;
 use bitvec::prelude::*;
 
 /// The CUDA-ready output (the bitvec + the source primitives + the CSR index).
@@ -34,6 +35,18 @@ pub struct CudaPackage {
     /// Length = num_states. The sentinel value (total array length) marks
     /// the end of the last state's records.
     pub ctrl_u32_offsets: Vec<u32>,
+    /// Whether the machine is deterministic (a DPDA). The GPU settled-mask kernels
+    /// (fused_sample / fused_project) are sound ONLY for deterministic machines: a single
+    /// settled config has a unique epsilon-closure. For a non-deterministic machine the
+    /// settled mask under-approximates the sound epsilon-closure-union mask, so the consumer
+    /// must fall back to the CPU closure-union mask (mask_at_cfg).
+    pub is_deterministic: bool,
+    /// The maximum epsilon-closure width (the distinct (state, top) pairs reachable via
+    /// epsilon moves from any single config). The GPU scan_mask / advance_pda BFS frontier
+    /// (the MAXF=64 cap) is sound ONLY when this width is <= 64; a wider closure truncates
+    /// the GPU mask (the under-approximation). This is the correct gate for the GPU
+    /// projection (the no the is_deterministic gate, which is too conservative).
+    pub max_closure_width: u32,
 }
 
 impl CudaPackage {
@@ -75,6 +88,8 @@ impl CudaPackage {
             num_transitions: m.transitions.len() as u32,
             bitvec,
             ctrl_u32_offsets,
+            is_deterministic: m.is_deterministic(),
+            max_closure_width: m.max_closure_width() as u32,
         })
     }
 

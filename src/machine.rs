@@ -302,11 +302,18 @@ impl PdaMachine {
     /// Uses the CSR index (ctrl_offsets + ctrl_counts) for O(1-3) transition
     /// lookups per state (instead of O(total_transitions) linear scan).
     pub fn advance_eps(&self, q: u32, stk: &[u32], a: u32) -> Option<(u32, Vec<u32>)> {
-        const MAX_EPS_CLOSURE: usize = 4096;
-        let mut configs: Vec<(u32, Vec<u32>)> = vec![(q, stk.to_vec())];
-        let mut i = 0;
         let use_csr = !self.ctrl_offsets.is_empty();
-        while i < configs.len() && configs.len() < MAX_EPS_CLOSURE {
+        let start_top = stk.last().copied().unwrap_or(self.start_stack);
+        // The epsilon closure is over (state, stack-top) pairs: an epsilon move
+        // delta(q, eps, top) -> (q', push) inspects only the stack TOP, so the
+        // reachable config space is bounded by num_states * num_stack_syms. We
+        // dedup on (state, top) so the BFS terminates exactly when no new pair
+        // is reachable (the full closure, the no synthetic cap).
+        let mut configs: Vec<(u32, Vec<u32>)> = vec![(q, stk.to_vec())];
+        let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        seen.insert((q, start_top));
+        let mut i = 0;
+        while i < configs.len() {
             let (cq, cstk) = configs[i].clone();
             i += 1;
             let ctop = cstk.last().copied().unwrap_or(self.start_stack);
@@ -324,7 +331,8 @@ impl PdaMachine {
                     for &p in t.push.iter().rev() {
                         ns.push(p);
                     }
-                    if !configs.iter().any(|(s, ss)| *s == t.next_q && *ss == ns) {
+                    let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                    if seen.insert((t.next_q, ns_top)) {
                         configs.push((t.next_q, ns));
                     }
                 }
@@ -336,7 +344,8 @@ impl PdaMachine {
                     for &p in push.iter().rev() {
                         ns.push(p);
                     }
-                    if !configs.iter().any(|(s, ss)| *s == q2 && *ss == ns) {
+                    let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                    if seen.insert((q2, ns_top)) {
                         configs.push((q2, ns));
                     }
                 }
@@ -371,6 +380,103 @@ impl PdaMachine {
             }
         }
         None
+    }
+
+    /// The NPDA epsilon-closure advance (the ALL next-configs, the no the single-config
+    /// advance_eps). From the input config-set, follow the epsilon closure of each config +
+    /// collect EVERY terminal-`a` move (the no the first). This is the sound step for a
+    /// non-deterministic PDA (the one_or_more loop keeps the loop branch alive, the no the
+    /// base-case-only advance that advance_eps gives). Returns the deduped next-config set.
+    pub fn advance_eps_set(
+        &self,
+        configs: &[(u32, Vec<u32>)],
+        a: u32,
+        max_stack_depth: usize,
+    ) -> Vec<(u32, Vec<u32>)> {
+        let use_csr = !self.ctrl_offsets.is_empty();
+        let mut result: Vec<(u32, Vec<u32>)> = Vec::new();
+        for (q, stk) in configs {
+            // The epsilon closure of (q, stk). The dedup is on the FULL stack (the no the
+            // (state, top) dedup, which cuts off the one_or_more recursion: the loop revisits the
+            // same (state, top) at a greater stack depth). The stack depth bound terminates the
+            // recursion (the bounded pushdown, the six-property).
+            let mut closed: Vec<(u32, Vec<u32>)> = vec![(*q, stk.clone())];
+            let mut seen: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+            seen.insert((*q, stk.clone()));
+            let mut i = 0;
+            while i < closed.len() {
+                let (cq, cstk) = closed[i].clone();
+                i += 1;
+                if cstk.len() > max_stack_depth {
+                    continue; // the stack depth bound (the no the unbounded recursion)
+                }
+                let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+                if use_csr {
+                    let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32) as usize;
+                    let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                    for j in 0..count {
+                        let t = &self.transitions[start + j];
+                        if t.a != self.num_inputs || t.top != ctop {
+                            continue;
+                        }
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in t.push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if seen.insert((t.next_q, ns.clone())) {
+                            closed.push((t.next_q, ns));
+                        }
+                    }
+                } else {
+                    for (q2, push) in self.transition(cq, None, ctop) {
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if seen.insert((q2, ns.clone())) {
+                            closed.push((q2, ns));
+                        }
+                    }
+                }
+            }
+            // The terminal moves: collect ALL (the no the first) from every closed config.
+            for (cq, cstk) in &closed {
+                let top = cstk.last().copied().unwrap_or(self.start_stack);
+                if use_csr {
+                    let start = self.ctrl_offsets.get(*cq as usize).copied().unwrap_or(self.transitions.len() as u32) as usize;
+                    let count = self.ctrl_counts.get(*cq as usize).copied().unwrap_or(0) as usize;
+                    for j in 0..count {
+                        let t = &self.transitions[start + j];
+                        if t.a == a && t.top == top {
+                            let mut s2 = cstk.clone();
+                            s2.pop();
+                            for &p in t.push.iter().rev() {
+                                s2.push(p);
+                            }
+                            let new_cfg = (t.next_q, s2);
+                            if !result.contains(&new_cfg) {
+                                result.push(new_cfg);
+                            }
+                        }
+                    }
+                } else {
+                    for t in self.lookup(*cq, Some(a), top) {
+                        let mut s2 = cstk.clone();
+                        s2.pop();
+                        for &p in t.push.iter().rev() {
+                            s2.push(p);
+                        }
+                        let new_cfg = (t.next_q, s2);
+                        if !result.contains(&new_cfg) {
+                            result.push(new_cfg);
+                        }
+                    }
+                }
+            }
+        }
+        result
     }
 
     /// The universal accepts: auto-selects the right simulation based on the
@@ -809,43 +915,11 @@ impl PdaStream for PdaMachine {
     }
 
     fn mask_batch(&self, configs: &[Self::Config]) -> Vec<Self::Mask> {
+        // Delegate to the full-stack mask_at_cfg (the consistent epsilon closure, the no the
+        // single-top approximation that desyncs on the empty-push epsilon moves).
         configs
             .iter()
-            .map(|(q, stk)| {
-                let top = stk.last().copied().unwrap_or(self.start_stack);
-                // Include the epsilon-closure: follow epsilon transitions from (q, top)
-                // and collect all allowed inputs from every reachable state.
-                let mut allowed: Vec<u32> = Vec::new();
-                let mut visited: std::collections::HashSet<(u32, u32)> =
-                    std::collections::HashSet::new();
-                let mut frontier = vec![(*q, top)];
-                while let Some((cq, ctop)) = frontier.pop() {
-                    if !visited.insert((cq, ctop)) {
-                        continue;
-                    }
-                    // Collect non-epsilon inputs from this state.
-                    for a in 0..self.num_inputs {
-                        if !self.lookup(cq, Some(a), ctop).is_empty() && !allowed.contains(&a) {
-                            allowed.push(a);
-                        }
-                    }
-                    // Follow epsilon transitions.
-                    for (q2, push) in self.transition(cq, None, ctop) {
-                        let new_top = if push.is_empty() {
-                            // Popped the top, no push: the new top is the previous stack element.
-                            // For simplicity, use the same top (the epsilon doesn't change the stack
-                            // in most RTN compilations).
-                            ctop
-                        } else {
-                            // The push is applied in reverse (the step_batch's iter().rev()), so the
-                            // new top is push.first() (the push[0], the return address for a call).
-                            *push.first().unwrap()
-                        };
-                        frontier.push((q2, new_top));
-                    }
-                }
-                allowed
-            })
+            .map(|(q, stk)| self.mask_at_cfg(*q, stk))
             .collect()
     }
 
@@ -884,66 +958,139 @@ impl PdaMachine {
     /// the set of inputs for which `advance_eps` succeeds (the proof
     /// `proof_mask_batch_consistent_with_advance_eps`). `mask_batch` is the
     /// batched form of this same computation.
-    pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
-        let top = stack.last().copied().unwrap_or(self.start_stack);
-        // Include the epsilon-closure: follow epsilon transitions from (q, top)
-        // and collect all allowed inputs from every reachable state.
-        let mut allowed: Vec<u32> = Vec::new();
-        let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
-        let mut frontier = vec![(q, top)];
+pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
+        // The epsilon closure over the FULL stack (the consistent with the advance_eps_set). The
+        // single-top approximation breaks on the empty-push epsilon moves (the pop reveals the
+        // element below, the no the same top), which desyncs the mask from the advance.
+        let mut closed: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
+        let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        seen.insert((q, stack.last().copied().unwrap_or(self.start_stack)));
+        let mut i = 0;
         let use_csr = !self.ctrl_offsets.is_empty();
-        while let Some((cq, ctop)) = frontier.pop() {
-            if !visited.insert((cq, ctop)) {
-                continue;
-            }
+        while i < closed.len() {
+            let (cq, cstk) = closed[i].clone();
+            i += 1;
+            let ctop = cstk.last().copied().unwrap_or(self.start_stack);
             if use_csr {
-                // The CSR fast path: scan only cq's transitions (the O(counts[cq])).
                 let start = self
                     .ctrl_offsets
                     .get(cq as usize)
                     .copied()
                     .unwrap_or(self.transitions.len() as u32) as usize;
                 let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
-                for t in &self.transitions[start..start + count] {
-                    if t.top != ctop {
+                for j in 0..count {
+                    let t = &self.transitions[start + j];
+                    if t.a != self.num_inputs || t.top != ctop {
                         continue;
                     }
-                    if t.a < self.num_inputs {
-                        // An input-consuming move: collect the input.
-                        if !allowed.contains(&t.a) {
-                            allowed.push(t.a);
-                        }
-                    } else {
-                        // An epsilon move: follow it to the next config.
-                        let new_top = if t.push.is_empty() {
-                            ctop
-                        } else {
-                            // The push is applied in reverse (the step_batch's
-                            // iter().rev()), so the new top is push.first() (the
-                            // push[0], the return address for a call).
-                            *t.push.first().unwrap()
-                        };
-                        frontier.push((t.next_q, new_top));
+                    let mut ns = cstk.clone();
+                    ns.pop();
+                    for &p in t.push.iter().rev() {
+                        ns.push(p);
+                    }
+                    let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                    if seen.insert((t.next_q, ns_top)) {
+                        closed.push((t.next_q, ns));
                     }
                 }
             } else {
-                // The linear fallback (the hand-built machine, the no CSR).
-                for a in 0..self.num_inputs {
-                    if !self.lookup(cq, Some(a), ctop).is_empty() && !allowed.contains(&a) {
-                        allowed.push(a);
+                for (q2, push) in self.transition(cq, None, ctop) {
+                    let mut ns = cstk.clone();
+                    ns.pop();
+                    for &p in push.iter().rev() {
+                        ns.push(p);
                     }
-                }
-for (q2, push) in self.transition(cq, None, ctop) {
-                    let new_top = if push.is_empty() {
-                        ctop
-                    } else {
-                        *push.first().unwrap()
-                    };
-                    frontier.push((q2, new_top));
+                    let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                    if seen.insert((q2, ns_top)) {
+                        closed.push((q2, ns));
+                    }
                 }
             }
         }
-        allowed
+        // Collect the allowed inputs over the closure.
+        let mut allowed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for (cq, cstk) in &closed {
+            let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+            if use_csr {
+                let start = self
+                    .ctrl_offsets
+                    .get(*cq as usize)
+                    .copied()
+                    .unwrap_or(self.transitions.len() as u32) as usize;
+                let count = self.ctrl_counts.get(*cq as usize).copied().unwrap_or(0) as usize;
+                for j in 0..count {
+                    let t = &self.transitions[start + j];
+                    if t.a < self.num_inputs && t.top == ctop {
+                        allowed.insert(t.a);
+                    }
+                }
+            } else {
+                for a in 0..self.num_inputs {
+                    if !self.lookup(*cq, Some(a), ctop).is_empty() {
+                        allowed.insert(a);
+                    }
+                }
+            }
+        }
+        let mut result: Vec<u32> = allowed.into_iter().collect();
+        result.sort();
+        result
+    }
+
+    /// The maximum epsilon-closure width (the distinct (state, top) pairs reachable) over ALL
+    /// start configs (q, top). This sizes the GPU scan_mask / advance_pda BFS frontier (the
+    /// MAXF): the frontier must hold at least this many pairs or the closure (and hence the
+    /// mask) is truncated. O(num_states x num_stack_syms x closure_cost).
+    pub fn max_closure_width(&self) -> usize {
+        let mut max_width = 0usize;
+        for q in 0..self.num_states {
+            for top in 0..self.num_stack_syms {
+                let stack = vec![top];
+                // Reuse mask_at_cfg's closure by counting its distinct (state, top) visits via a
+                // local BFS mirror (the mask_at_cfg returns the allowed inputs, not the width).
+                let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+                let mut frontier: Vec<(u32, u32)> = vec![(q, top)];
+                let use_csr = !self.ctrl_offsets.is_empty();
+                while let Some((cq, ctop)) = frontier.pop() {
+                    if !visited.insert((cq, ctop)) {
+                        continue;
+                    }
+                    if use_csr {
+                        let start = self
+                            .ctrl_offsets
+                            .get(cq as usize)
+                            .copied()
+                            .unwrap_or(self.transitions.len() as u32) as usize;
+                        let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                        for t in &self.transitions[start..start + count] {
+                            if t.top != ctop {
+                                continue;
+                            }
+                            if t.a == self.num_inputs {
+                                let new_top = if t.push.is_empty() {
+                                    ctop
+                                } else {
+                                    *t.push.first().unwrap()
+                                };
+                                frontier.push((t.next_q, new_top));
+                            }
+                        }
+                    } else {
+                        for (q2, push) in self.transition(cq, None, ctop) {
+                            let new_top = if push.is_empty() {
+                                ctop
+                            } else {
+                                *push.first().unwrap()
+                            };
+                            frontier.push((q2, new_top));
+                        }
+                    }
+                }
+                let _ = &stack;
+                max_width = max_width.max(visited.len());
+            }
+        }
+        max_width
     }
 
     /// The the mask at a SINGLE settled config (the (state, stack-top)) - the

@@ -6,7 +6,7 @@
 use pushdown_rs::bitvec::BitvecError;
 use pushdown_rs::compile::{kappa, Cfg};
 use pushdown_rs::machine::{PdaMachine, Transition};
-use pushdown_rs::pda::{Dpda, Npda};
+use pushdown_rs::pda::{Dpda, Npda, PdaStream};
 
 // The a^n b^n DPDA (the JFLAP tutorial):
 //   Q = {q0, q1, q2, q3}, Sigma = {a, b}, Gamma = {Z, a}
@@ -1502,6 +1502,63 @@ fn proof_mask_at_cfg_settled_is_precise() {
     }
 }
 
+// PROOF (the drafting-desync root cause): for a NON-deterministic PDA, the GPU
+// single-config projection (mask_at_cfg_settled, what fused_sample / fused_project
+// compute) is a STRICT under-approximation of the sound epsilon-closure union mask
+// (mask_at_cfg). The Qwen tool grammar's PDA is non-deterministic (overlapping token
+// ranges, e.g. token 0 in two terminals), so the GPU draft mask under-masks: it omits
+// inputs that are legal at an epsilon-reachable config. An illegal-looking draft (like a
+// stray "\n\n") then slips through the under-masked draft gate + the under-masked target
+// verify, desyncing the guidance FSM. This test proves the under-approximation on a
+// minimal non-deterministic machine.
+#[test]
+fn proof_settled_mask_underapproximates_closure_mask_when_nondeterministic() {
+    const A: u32 = 0;
+    const B: u32 = 1;
+    const EPS: u32 = 2; // the num_inputs
+    const Z: u32 = 0; // the start_stack
+    // q0 has TWO epsilon moves (to q1 and q2) -> non-deterministic. q1 allows A, q2 allows B.
+    let m = PdaMachine {
+        num_states: 3,
+        num_inputs: 2,
+        num_stack_syms: 1,
+        transitions: vec![
+            Transition { q: 0, a: EPS, top: Z, next_q: 1, push: vec![] },
+            Transition { q: 0, a: EPS, top: Z, next_q: 2, push: vec![] },
+            Transition { q: 1, a: A, top: Z, next_q: 1, push: vec![Z] },
+            Transition { q: 2, a: B, top: Z, next_q: 2, push: vec![Z] },
+        ],
+        accepting: vec![1, 2],
+        start_state: 0,
+        start_stack: Z,
+        state_provenance: None,
+        vocab_names: None,
+        ctrl_offsets: vec![],
+        ctrl_counts: vec![],
+        flat_a: vec![],
+        flat_top: vec![],
+        flat_next_q: vec![],
+    };
+    // The machine is genuinely non-deterministic (the two eps branches from q0).
+    assert!(!m.is_deterministic(), "the machine must be non-deterministic for the proof");
+    // The sound mask (the epsilon-closure union) allows BOTH inputs.
+    let closure = m.mask_at_cfg(0, &[]);
+    let mut closure_sorted = closure.clone();
+    closure_sorted.sort();
+    assert_eq!(closure_sorted, vec![A, B], "the closure union allows both a and b");
+    // The GPU single-config (settled) mask allows NEITHER (q0 has no input move).
+    let settled = m.mask_at_cfg_settled(0, Z);
+    assert!(
+        settled.is_empty(),
+        "the settled single-config mask is empty (the GPU under-mask)"
+    );
+    // The defect: settled is a strict subset of closure (the GPU under-masks).
+    assert!(
+        settled.iter().all(|&x| closure.contains(&x)) && settled.len() < closure.len(),
+        "the settled mask strictly under-approximates the closure mask"
+    );
+}
+
 // PROOF: the mask_batch (the epsilon-closure mask, the public PdaStream entry)
 // is EXACTLY the set of inputs for which advance_eps (the epsilon-closure
 // advance) succeeds. This is the consistent (mask, advance) pair for the
@@ -1638,30 +1695,42 @@ fn proof_mask_settled_csr_equals_linear() {
 // independent `lookup` + the Pda-trait `transition`, NOT the CSR).
 fn mask_at_cfg_linear_reference(m: &PdaMachine, q: u32, stack: &[u32]) -> Vec<u32> {
     use pushdown_rs::pda::Pda;
-    let top = stack.last().copied().unwrap_or(m.start_stack);
-    let mut allowed: Vec<u32> = Vec::new();
-    let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
-    let mut frontier = vec![(q, top)];
-    while let Some((cq, ctop)) = frontier.pop() {
-        if !visited.insert((cq, ctop)) {
-            continue;
-        }
-        for a in 0..m.num_inputs {
-            if !m.lookup(cq, Some(a), ctop).is_empty() && !allowed.contains(&a) {
-                allowed.push(a);
+    // The full-stack epsilon closure (the consistent with the mask_at_cfg, the no the single-top
+    // approximation that desyncs on the empty-push epsilon moves). The linear-scan lookup (the
+    // no the CSR) is the independent reference.
+    let mut closed: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
+    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    seen.insert((q, stack.last().copied().unwrap_or(m.start_stack)));
+    let mut i = 0;
+    while i < closed.len() {
+        let (cq, cstk) = closed[i].clone();
+        i += 1;
+        let ctop = cstk.last().copied().unwrap_or(m.start_stack);
+        for (q2, push) in m.transition(cq, None, ctop) {
+            let mut ns = cstk.clone();
+            ns.pop();
+            for &p in push.iter().rev() {
+                ns.push(p);
+            }
+            let ns_top = ns.last().copied().unwrap_or(m.start_stack);
+            if seen.insert((q2, ns_top)) {
+                closed.push((q2, ns));
             }
         }
-        for (q2, push) in m.transition(cq, None, ctop) {
-            let new_top = if push.is_empty() {
-                ctop
-            } else {
-                *push.first().unwrap()
-            };
-            frontier.push((q2, new_top));
+    }
+    // Collect the allowed inputs over the closure.
+    let mut allowed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for (cq, cstk) in &closed {
+        let ctop = cstk.last().copied().unwrap_or(m.start_stack);
+        for a in 0..m.num_inputs {
+            if !m.lookup(*cq, Some(a), ctop).is_empty() {
+                allowed.insert(a);
+            }
         }
     }
-    allowed.sort();
-    allowed
+    let mut result: Vec<u32> = allowed.into_iter().collect();
+    result.sort();
+    result
 }
 
 // PROOF: the CSR-based mask_at_cfg (the epsilon-closure union) equals the
@@ -2186,4 +2255,411 @@ fn proof_displacement_is_bfs() {
         assert_eq!(in_stack, out_stack, "the empty displacement is the identity (the in_stack == the out_stack)");
     }
     assert!(!d_empty.is_empty(), "the empty displacement is non-empty (the reachable in_configs exist)");
+}
+
+// ============================================================================
+// PROOF: advance_eps computes the COMPLETE epsilon closure (the no synthetic
+// caps) on a PDA with a stack-growing epsilon cycle. The independent reference
+// below dedups on (state, stack-top) with no cap, so agreement proves 100%
+// inclusion (a reachable terminal is found) + 100% exclusion (an unreachable
+// one is not).
+// ============================================================================
+
+/// A DPDA with a stack-growing epsilon cycle: q=2 <-> q=3 both push [1,1] onto
+/// top=1 (the stack grows unboundedly, the top stays 1). Terminal `a` (0) is
+/// available only at (q=2, top=1); terminal `b` (1) is nowhere.
+fn cycle_dpda() -> PdaMachine {
+    const EPS: u32 = 2; // the num_inputs
+    const A: u32 = 0;
+    PdaMachine {
+        num_states: 4,
+        num_inputs: 2,
+        num_stack_syms: 2,
+        transitions: vec![
+            Transition { q: 0, a: EPS, top: 0, next_q: 1, push: vec![0] },
+            Transition { q: 1, a: EPS, top: 0, next_q: 2, push: vec![1, 0] },
+            Transition { q: 2, a: EPS, top: 1, next_q: 3, push: vec![1, 1] }, // the cycle grow
+            Transition { q: 3, a: EPS, top: 1, next_q: 2, push: vec![1, 1] }, // the cycle grow
+            Transition { q: 2, a: A, top: 1, next_q: 2, push: vec![1] }, // the terminal a at (2, top=1)
+        ],
+        accepting: vec![3],
+        start_state: 0,
+        start_stack: 0,
+        state_provenance: None,
+        vocab_names: None,
+        ctrl_offsets: vec![],
+        ctrl_counts: vec![],
+        flat_a: vec![],
+        flat_top: vec![],
+        flat_next_q: vec![],
+    }
+}
+
+/// The independent reference epsilon closure (the no caps, the (state, top) dedup).
+/// Returns the next-state for a terminal-`a` move reachable in the closure, or None.
+/// Assumes all epsilon pushes are non-empty (true for cycle_dpda); the new top is
+/// push.first() because advance_eps reverse-pushes (push.iter().rev()).
+fn reference_advance_state(m: &PdaMachine, q: u32, stk: &[u32], a: u32) -> Option<u32> {
+    let start_top = stk.last().copied().unwrap_or(m.start_stack);
+    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+    let mut queue: Vec<(u32, u32)> = vec![(q, start_top)];
+    seen.insert((q, start_top));
+    let mut head = 0;
+    while head < queue.len() {
+        let (cs, ctop) = queue[head];
+        head += 1;
+        for t in &m.transitions {
+            if t.q == cs && t.a == m.num_inputs && t.top == ctop {
+                // The advance_eps reverse-pushes (push.iter().rev()), so the FIRST
+                // element of push ends up on top.
+                let nt = t.push.first().copied().unwrap_or(m.start_stack);
+                if seen.insert((t.next_q, nt)) {
+                    queue.push((t.next_q, nt));
+                }
+            }
+        }
+    }
+    for &(cs, ctop) in &queue {
+        for t in &m.transitions {
+            if t.q == cs && t.a == a && t.top == ctop {
+                return Some(t.next_q);
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn advance_eps_inclusion_matches_reference_on_cycle() {
+    let m = cycle_dpda();
+    // The terminal a (0) IS reachable at (q=2, top=1) via the epsilon closure.
+    let got = m.advance_eps(0, &[], 0).map(|(nq, _)| nq);
+    let want = reference_advance_state(&m, 0, &[], 0);
+    assert_eq!(got, want, "the advance_eps next-state must match the independent reference");
+    assert_eq!(got, Some(2), "the terminal a reaches q=2 (the 100% inclusion)");
+}
+
+#[test]
+fn advance_eps_exclusion_matches_reference_on_cycle() {
+    let m = cycle_dpda();
+    // The terminal b (1) is NOT reachable (no b transition exists).
+    let got = m.advance_eps(0, &[], 1).map(|(nq, _)| nq);
+    let want = reference_advance_state(&m, 0, &[], 1);
+    assert_eq!(got, want, "the advance_eps next-state must match the independent reference");
+    assert_eq!(got, None, "the unreachable terminal b yields None (the 100% exclusion)");
+}
+
+#[test]
+fn advance_eps_terminates_on_stack_growing_cycle() {
+    // The stack-growing cycle (q=2 <-> q=3, push [1,1]) must terminate (the (state, top)
+    // dedup bounds it) and still find the terminal. A fast return proves termination.
+    let m = cycle_dpda();
+    let start = std::time::Instant::now();
+    let r = m.advance_eps(0, &[], 0);
+    let elapsed = start.elapsed();
+    assert!(r.is_some(), "the terminal is reached despite the cycle");
+    assert!(
+        elapsed.as_millis() < 1000,
+        "the closure terminates quickly (the no unbounded stack growth): {elapsed:?}"
+    );
+}
+
+// PROOF: for a NON-deterministic PDA, the CPU project_batch (the sound
+// epsilon-closure-union mask at each draft step) includes a legal draft that the
+// GPU settled projection (mask_at_cfg_settled) wrongly excludes. This qualifies why
+// the non-deterministic fallback MUST use the CPU closure-union projection.
+#[test]
+fn proof_project_batch_sound_where_settled_is_not() {
+    const A: u32 = 0;
+    const B: u32 = 1;
+    const EPS: u32 = 2; // the num_inputs
+    const Z: u32 = 0; // the start_stack
+    // q0 has TWO epsilon moves (to q1 and q2) -> non-deterministic. q1 allows A, q2 allows B.
+    let m = PdaMachine {
+        num_states: 3,
+        num_inputs: 2,
+        num_stack_syms: 1,
+        transitions: vec![
+            Transition { q: 0, a: EPS, top: Z, next_q: 1, push: vec![Z] },
+            Transition { q: 0, a: EPS, top: Z, next_q: 2, push: vec![Z] },
+            Transition { q: 1, a: A, top: Z, next_q: 1, push: vec![Z] },
+            Transition { q: 2, a: B, top: Z, next_q: 2, push: vec![Z] },
+        ],
+        accepting: vec![1, 2],
+        start_state: 0,
+        start_stack: Z,
+        state_provenance: None,
+        vocab_names: None,
+        ctrl_offsets: vec![],
+        ctrl_counts: vec![],
+        flat_a: vec![],
+        flat_top: vec![],
+        flat_next_q: vec![],
+    };
+    assert!(!m.is_deterministic(), "the machine is non-deterministic (the two eps branches from q0)");
+
+    // The settled (GPU) mask at the start is EMPTY (q0 has no input move) -> under-approximates.
+    let settled = m.mask_at_cfg_settled(0, Z);
+    assert!(settled.is_empty(), "the settled single-config mask is empty at q0 (the under-approximation)");
+
+    // The sound closure-union mask at the start includes BOTH branch inputs.
+    let closure = m.mask_at_cfg(0, &[Z]);
+    assert!(closure.contains(&A) && closure.contains(&B), "the closure-union mask includes both branch inputs");
+
+    // The draft [B] is LEGAL (via branch q2). The sound project_batch includes B at step 0.
+    let masks = m.project_batch(&[(0, vec![Z])], &[vec![B]]);
+    assert!(
+        masks[0][0].contains(&B),
+        "the project_batch step-0 mask includes the legal draft B (the sound inclusion)"
+    );
+    // The contrast: the settled mask excludes B (the GPU projection would wrongly reject the legal draft).
+    assert!(!settled.contains(&B), "the settled mask excludes B (the GPU projection is unsound here)");
+}
+
+// Isolate the one-or-more (the +) loop: does the RTN compilation produce a machine that
+// repeats the loop body? The grammar S -> A, A -> B A | B is the language B+ (one or more B's).
+// If the loop back-edge is missing, the machine only accepts a single B (the A -> B exit) and
+// rejects BB, BBB (the A -> B A repetition). This isolates the reasoning_block (<...>)+ desync.
+#[test]
+fn rtn_one_or_more_loop_repeats() {
+    let g = Cfg::new(
+        2, // the num_nonterminals: S=0, A=1
+        1, // the num_terminals: B=local 0 (the global 2)
+        0, // the start = S
+        vec![
+            (0, vec![1]),    // S -> A
+            (1, vec![2, 1]), // A -> B A (the loop: consume B, then A again)
+            (1, vec![2]),    // A -> B (the loop exit)
+        ],
+    );
+    let m = pushdown_rs::compile(&g).expect("compile the B+ grammar");
+    assert!(m.accepts(&[0]), "a single B is in B+");
+    assert!(m.accepts(&[0, 0]), "two B's are in B+ (the loop repeats once)");
+    assert!(m.accepts(&[0, 0, 0]), "three B's are in B+ (the loop repeats twice)");
+    assert!(!m.accepts(&[]), "the empty string is not in B+");
+}
+
+// The nested-loop shape of the Qwen reasoning_block: "(<text_range>)+ (<reasoning_end>)".
+// The one_or_more expansion is P -> T (the base) + P -> P T (the loop), followed by a trailing
+// RE. The language is T+ RE (one-or-more T's then the RE). If the loop back-edge is lost when a
+// trailing symbol follows the loop, T T RE is rejected (the desync).
+#[test]
+fn rtn_nested_loop_with_trailing_symbol_repeats() {
+    // N = {S=0, P=1}, T = {T=0, RE=1} (the local terminal IDs).
+    //   S -> P RE
+    //   P -> T        (the base: one T)
+    //   P -> P T       (the loop: P then T)
+    let g = Cfg::new(
+        2, // the num_nonterminals: S=0, P=1
+        2, // the num_terminals: T=local 0 (the global 2), RE=local 1 (the global 3)
+        0, // the start = S
+        vec![
+            (0, vec![1, 3]), // S -> P RE (the P=global 1, the RE=global 3)
+            (1, vec![2]),    // P -> T (the T=global 2)
+            (1, vec![1, 2]), // P -> P T (the loop)
+        ],
+    );
+    let m = pushdown_rs::compile(&g).expect("compile the nested-loop grammar");
+    assert!(m.accepts(&[0, 1]), "T RE (the single-iteration base case)");
+    assert!(m.accepts(&[0, 0, 1]), "T T RE (the loop repeats once)");
+    assert!(m.accepts(&[0, 0, 0, 1]), "T T T RE (the loop repeats twice)");
+    assert!(!m.accepts(&[1]), "RE alone is not T+ RE");
+}
+
+// Reproduce the Qwen reasoning_block nesting: an inner one-or-more loop (the IP -> IP T)
+// followed by a trailing symbol (the RE), itself nested inside an outer one-or-more loop
+// (the OP -> OP A). The language is (T+ RE) (A+) E. A valid string is T T RE TC E.
+// If the inner loop's back-edge is lost under the nesting, T T RE ... is rejected.
+#[test]
+fn rtn_nested_loops_reproduce_qwen_shape() {
+    // N = {S=0, RB=1, IP=2, OP=3, A=4}; T = {T=5, RE=6, TC=7, TX=8, E=9} (the global IDs).
+    let g = Cfg::new(
+        5, // the num_nonterminals
+        5, // the num_terminals
+        0, // the start = S
+        vec![
+            (0, vec![1, 3, 9]), // S -> RB OP E
+            (1, vec![2, 6]),    // RB -> IP RE
+            (2, vec![5]),      // IP -> T (the inner-loop base)
+            (2, vec![2, 5]),   // IP -> IP T (the inner-loop back-edge)
+            (3, vec![4]),      // OP -> A (the outer-loop base)
+            (3, vec![3, 4]),   // OP -> OP A (the outer-loop back-edge)
+            (4, vec![7]),      // A -> TC
+            (4, vec![8]),      // A -> TX
+        ],
+    );
+    let m = pushdown_rs::compile(&g).expect("compile the nested-loop grammar");
+    // The local terminal IDs: T=0, RE=1, TC=2, TX=3, E=4.
+    // A valid string: T T RE TC E = [0, 0, 1, 2, 4].
+    assert!(
+        m.accepts(&[0, 0, 1, 2, 4]),
+        "T T RE TC E is valid (the inner loop repeats once)"
+    );
+    assert!(
+        m.accepts(&[0, 0, 0, 1, 2, 4]),
+        "T T T RE TC E is valid (the inner loop repeats twice)"
+    );
+    assert!(m.accepts(&[0, 1, 2, 4]), "T RE TC E is valid (the inner loop base case)");
+}
+
+// The Qwen start-shape with the THIRD nested loop: the outer (tool_call | text)+ loop whose
+// text branch is itself a one-or-more (the text: (<R2>)+). Three nested one_or_more loops.
+// A valid string is R1 R1 RE TC EOS (two inner-1 tokens, the reasoning-end, one tool, the eos).
+#[test]
+fn rtn_triple_nested_loops_reproduce_qwen_start() {
+    // N = {S=0, RB=1, IP=2, OP=3, CH=4, TX=5}; T = {R1=6, RE=7, TC=8, R2=9, EOS=10} (the global).
+    let g = Cfg::new(
+        6, // the num_nonterminals
+        5, // the num_terminals
+        0, // the start = S
+        vec![
+            (0, vec![1, 3, 10]), // S -> RB OP EOS
+            (1, vec![2, 7]),     // RB -> IP RE
+            (2, vec![6]),       // IP -> R1 (the inner-1 base)
+            (2, vec![2, 6]),    // IP -> IP R1 (the inner-1 loop)
+            (3, vec![4]),       // OP -> CH (the outer base)
+            (3, vec![3, 4]),    // OP -> OP CH (the outer loop)
+            (4, vec![8]),       // CH -> TC
+            (4, vec![5]),       // CH -> TX
+            (5, vec![9]),       // TX -> R2 (the inner-2 base)
+            (5, vec![5, 9]),    // TX -> TX R2 (the inner-2 loop)
+        ],
+    );
+    let m = pushdown_rs::compile(&g).expect("compile the triple-nested grammar");
+    // The local terminal IDs: R1=0, RE=1, TC=2, R2=3, EOS=4.
+    // A valid string: R1 R1 RE TC EOS = [0, 0, 1, 2, 4].
+    assert!(
+        m.accepts(&[0, 0, 1, 2, 4]),
+        "R1 R1 RE TC EOS is valid (the inner-1 loop repeats once)"
+    );
+    assert!(
+        m.accepts(&[0, 0, 0, 1, 2, 4]),
+        "R1 R1 R1 RE TC EOS is valid (the inner-1 loop repeats twice)"
+    );
+}
+
+// The EXACT Qwen start-shape: THREE nested one_or_more loops. The inner-1 loop (the IP) is in
+// the reasoning_block, the inner-2 loop (the TX) is nested INSIDE the outer loop's (the OP)
+// choice body. This is the structure that breaks the RTN loop back-edge.
+#[test]
+fn rtn_three_nested_loops_qwen_exact_shape() {
+    // N = {S=0, RB=1, IP=2, OP=3, C=4, TX=5}; T = {T=6, RE=7, TC=8, R2=9, EOS=10} (the global).
+    let g = Cfg::new(
+        6, // the num_nonterminals
+        5, // the num_terminals
+        0, // the start = S
+        vec![
+            (0, vec![1, 3, 10]), // S -> RB OP EOS
+            (1, vec![2, 7]),     // RB -> IP RE
+            (2, vec![6]),       // IP -> T (the inner-1 base)
+            (2, vec![2, 6]),    // IP -> IP T (the inner-1 loop)
+            (3, vec![4]),       // OP -> C (the outer base)
+            (3, vec![3, 4]),    // OP -> OP C (the outer loop)
+            (4, vec![8]),       // C -> TC
+            (4, vec![5]),       // C -> TX
+            (5, vec![9]),       // TX -> R2 (the inner-2 base)
+            (5, vec![5, 9]),    // TX -> TX R2 (the inner-2 loop, nested in the outer choice)
+        ],
+    );
+    let m = pushdown_rs::compile(&g).expect("compile the three-nested-loop grammar");
+    // The local terminal IDs: T=0, RE=1, TC=2, R2=3, EOS=4.
+    // A valid string: T T RE TC EOS = [0, 0, 1, 2, 4] (the inner-1 loop repeats once).
+    assert!(m.accepts(&[0, 0, 1, 2, 4]), "T T RE TC EOS is valid (the inner-1 loop repeats once)");
+    assert!(
+        m.accepts(&[0, 0, 0, 1, 2, 4]),
+        "T T T RE TC EOS is valid (the inner-1 loop repeats twice)"
+    );
+    // The inner-2 loop (the TX -> TX R2): T RE R2 R2 TC EOS = [0, 1, 3, 3, 2, 4].
+    assert!(
+        m.accepts(&[0, 1, 3, 3, 2, 4]),
+        "T RE R2 R2 TC EOS is valid (the inner-2 loop repeats once)"
+    );
+}
+
+// The EXACT Qwen CFG (the 15 nonterminals + the 25 terminals, the three one_or_more loops, the
+// start rule referencing two loops directly). Reproduced from the PdaGrammar local-ID dump. If
+// the RTN compile drops a loop back-edge for this shape, the inner `plus` loop (NT1) only repeats
+// once. Global IDs: nonterminals 0..14, terminals 15..39 (the 15 + the local terminal ID).
+#[test]
+fn rtn_exact_qwen_cfg_loop_back_edge() {
+    let g = Cfg::new(
+        15, // the num_nonterminals
+        25, // the num_terminals
+        0, // the start
+        vec![
+            (0, vec![1, 16, 2, 3]), // start -> NT1 T1 NT2 NT3
+            (1, vec![17]), // NT1 -> T2 (the plus base)
+            (1, vec![1, 17]), // NT1 -> NT1 T2 (the plus loop)
+            (2, vec![19]), // NT2 -> NT4 (the plus#3 base)
+            (2, vec![2, 19]), // NT2 -> NT2 NT4 (the plus#3 loop)
+            (3, vec![18]), // NT3 -> T3 (the eos)
+            (3, vec![19]), // NT3 -> T4 (the eos alt)
+            (4, vec![20, 13, 38]), // NT4 -> T5 NT13 T23 (the tool_call)
+            (4, vec![14]), // NT4 -> NT14 (the text choice)
+            (6, vec![1, 16]), // NT6 -> NT1 T1 (the reasoning_block, the orphaned)
+            (7, vec![22, 23]), // NT7 -> T7 T8
+            (8, vec![24, 23]), // NT8 -> T9 T8
+            (9, vec![27, 23]), // NT9 -> T12 T8
+            (10, vec![30, 23]), // NT10 -> T15 T8
+            (11, vec![35, 23]), // NT11 -> T20 T8
+            (12, vec![36, 23]), // NT12 -> T21 T8
+            (13, vec![21, 22, 23, 8, 25]), // NT13 -> T6 T7 T8 NT8 T10 (the tool_0)
+            (13, vec![26, 27, 23, 28]), // NT13 -> T11 T12 T8 T13 (the tool_1)
+            (13, vec![29, 30, 23, 31]), // NT13 -> T14 T15 T8 T16 (the tool_2)
+            (13, vec![32, 33]), // NT13 -> T17 T18 (the tool_3)
+            (13, vec![34, 35, 23, 12, 37]), // NT13 -> T19 T20 T8 NT12 T22 (the tool_4)
+            (14, vec![39]), // NT14 -> T24 (the text base)
+            (14, vec![14, 39]), // NT14 -> NT14 T24 (the text loop)
+        ],
+    );
+    let m = pushdown_rs::compile(&g).expect("compile the exact Qwen CFG");
+    // The inner `plus` loop (NT1, the T2 = local 2): the NPDA config-SET advance (the
+    // advance_eps_set) must keep the loop branch alive. A single-config advance_eps drops it
+    // (the base case wins, the loop is lost).
+    let start_set = vec![(m.start_state, vec![m.start_stack])];
+    let set1 = m.advance_eps_set(&start_set, 2, 8);
+    eprintln!("[DBG qwen-cfg] config-set after 1st T2: {} configs", set1.len());
+    let set2 = m.advance_eps_set(&set1, 2, 8);
+    eprintln!("[DBG qwen-cfg] config-set after 2nd T2: {} configs", set2.len());
+    assert!(
+        !set2.is_empty(),
+        "the plus loop back-edge: a second T2 must advance the config set (the + is one-or-more, the NPDA frontier keeps the loop branch)"
+    );
+    // The contrast: the single-config advance_eps drops the loop (the cfg2 is None).
+    let cfg1 = m.advance_eps(m.start_state, &[m.start_stack], 2);
+    let cfg2_single = cfg1.and_then(|c| m.advance_eps(c.0, &c.1, 2));
+    eprintln!("[DBG qwen-cfg] single-config advance_eps 2nd T2 = {:?} (the dropped loop, the contrast)", cfg2_single.is_some());
+}
+
+// Isolate the mask_at_cfg behavior on a minimal 3-state PDA (the start -> the a-consumer).
+// The mask_at_cfg(0, &[]) must return the allowed input at the start config (the epsilon closure
+// reaches the a-consumer). If it returns empty, the mask_at_cfg closure is broken.
+#[test]
+fn debug_mask_at_cfg_minimal() {
+    const EPS: u32 = 2; // the num_inputs
+    const A: u32 = 0;
+    const Z: u32 = 0; // the start_stack
+    let m = PdaMachine {
+        num_states: 3,
+        num_inputs: 2,
+        num_stack_syms: 2,
+        transitions: vec![
+            Transition { q: 0, a: EPS, top: Z, next_q: 1, push: vec![Z] },
+            Transition { q: 1, a: A, top: Z, next_q: 2, push: vec![Z] },
+        ],
+        accepting: vec![2],
+        start_state: 0,
+        start_stack: Z,
+        state_provenance: None,
+        vocab_names: None,
+        ctrl_offsets: vec![],
+        ctrl_counts: vec![],
+        flat_a: vec![],
+        flat_top: vec![],
+        flat_next_q: vec![],
+    };
+    eprintln!("[DBG minimal] mask_at_cfg(0, &[]) = {:?}", m.mask_at_cfg(0, &[]));
+    eprintln!("[DBG minimal] mask_at_cfg(0, &[0]) = {:?}", m.mask_at_cfg(0, &[0]));
+    eprintln!("[DBG minimal] mask_at_cfg(1, &[0]) = {:?}", m.mask_at_cfg(1, &[0]));
+    assert_eq!(m.mask_at_cfg(0, &[]), vec![A], "the start config's mask must allow the input A (the epsilon closure reaches the a-consumer)");
 }
