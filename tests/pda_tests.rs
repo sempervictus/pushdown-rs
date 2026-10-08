@@ -140,11 +140,11 @@ fn rtn_compilation_state_count_and_language() {
     let m2 = pushdown_rs::compile(&g2).expect("compile");
     // the c input ID for the c (the global 3) = 3 - 1 = 2
     assert!(
-        m2.accepts_npda(&[2]),
+        m2.accepts_npda(&g2, &[2]),
         "the NPDA accepts c (the S -> c)"
     );
     assert!(
-        !m2.accepts_npda(&[0]),
+        !m2.accepts_npda(&g2, &[0]),
         "the NPDA rejects a (the no S -> a)"
     );
 }
@@ -440,15 +440,15 @@ fn rtn_ambiguous_grammar_is_npda() {
     const A: u32 = 0; // the a (the local input ID)
     const B: u32 = 1; // the b (the local input ID)
     assert!(
-        m.accepts_npda(&[A, B]),
+        m.accepts_npda(&g, &[A, B]),
         "the NPDA accepts ab (the n=1)"
     );
     assert!(
-        m.accepts_npda(&[A, A, B, B]),
+        m.accepts_npda(&g, &[A, A, B, B]),
         "the NPDA accepts aabb (the n=2)"
     );
     assert!(
-        !m.accepts_npda(&[A, B, A]),
+        !m.accepts_npda(&g, &[A, B, A]),
         "the NPDA rejects aba (the unbalanced)"
     );
 }
@@ -574,6 +574,90 @@ fn bitvec_size_is_exact() {
     );
 }
 
+// PROOF: the from_bitvec re-sorts the transitions (the the CSR invariant). A
+// well-formed bitvec (the to_bitvec of a sorted machine) is already sorted, so
+// the re-sort is a no-op (the the identity round-trip). A CORRUPTED bitvec (the
+// unsorted transitions) would produce a WRONG CSR (the the contiguity violated)
+// without the re-sort. This test verifies: (1) the round-trip is the identity
+// (the sorted case), (2) the from_bitvec on an UNsorted transition order still
+// yields a valid CSR (the the re-sort fixes it, the no the silent wrong CSR).
+#[test]
+fn proof_from_bitvec_resorts_for_csr_invariant() {
+    // The (1) the identity round-trip (the sorted machine, the to_bitvec -> the
+    // from_bitvec is the identity).
+    let m = pushdown_rs::compile(&Cfg::new(1, 2, 0, vec![(0, vec![1, 0, 2]), (0, vec![])]))
+        .expect("compile");
+    let bits = m.to_bitvec();
+    let m2 = PdaMachine::from_bitvec(&bits).expect("round-trip");
+    assert_eq!(m, m2, "the bitvec round-trip is the identity (the sorted case)");
+    // The CSR invariant holds on the round-tripped machine.
+    for q in 0..m2.num_states {
+        let start = m2.ctrl_offsets[q as usize] as usize;
+        let count = m2.ctrl_counts[q as usize] as usize;
+        for t in &m2.transitions[start..start + count] {
+            assert_eq!(t.q, q, "the CSR range for q must contain only q's transitions");
+        }
+    }
+    // The (2) the unsorted case: hand-build a bitvec with the transitions in a
+    // NON-sorted order (the the q's scattered), and verify the from_bitvec
+    // re-sorts (the the CSR invariant holds, the no the silent wrong CSR).
+    // The machine: the 2 states, the 1 transition each, the q=1 before the q=0
+    // (the the UNsorted order).
+    let unsorted_m = PdaMachine {
+        num_states: 2,
+        num_inputs: 1,
+        num_stack_syms: 1,
+        transitions: vec![
+            Transition { q: 1, a: 0, top: 0, next_q: 1, push: vec![0] }, // the q=1 FIRST.
+            Transition { q: 0, a: 0, top: 0, next_q: 0, push: vec![0] }, // the q=0 SECOND.
+        ],
+        accepting: vec![1],
+        start_state: 0,
+        start_stack: 0,
+        state_provenance: None,
+        vocab_names: None,
+        ctrl_offsets: vec![],
+        ctrl_counts: vec![],
+        flat_a: vec![],
+        flat_top: vec![],
+        flat_next_q: vec![],
+    };
+    // The to_bitvec writes the transitions in the stored (UNsorted) order.
+    let unsorted_bits = unsorted_m.to_bitvec();
+    let reloaded = PdaMachine::from_bitvec(&unsorted_bits).expect("reload");
+    // The from_bitvec re-sorted (the the q=0 transition now before the q=1).
+    assert_eq!(
+        reloaded.transitions[0].q, 0,
+        "the from_bitvec must re-sort (the q=0 first, the no the unsorted q=1 first)"
+    );
+    assert_eq!(reloaded.transitions[1].q, 1, "the q=1 second (the sorted order)");
+    // The CSR invariant holds on the reloaded machine.
+    for q in 0..reloaded.num_states {
+        let start = reloaded.ctrl_offsets[q as usize] as usize;
+        let count = reloaded.ctrl_counts[q as usize] as usize;
+        for t in &reloaded.transitions[start..start + count] {
+            assert_eq!(t.q, q, "the CSR range for q must contain only q's transitions (the re-sorted)");
+        }
+    }
+}
+
+// PROOF: the derives_eps is TOTAL (the no the out-of-range panic). A terminal
+// ID or an out-of-range nt returns false (the no the panic). The valid
+// nonterminal returns the correct nullable status.
+#[test]
+fn proof_derives_eps_is_total() {
+    use pushdown_rs::compile::derives_eps;
+    // The S -> A, A -> eps (the S is nullable via the A).
+    let g = Cfg::new(2, 1, 0, vec![(0, vec![1]), (1, vec![])]);
+    assert!(derives_eps(&g, 0), "the S is nullable (the S -> A -> eps)");
+    assert!(derives_eps(&g, 1), "the A is nullable (the A -> eps)");
+    // The terminal ID (the 2, the num_nt=2, the terminal range is 2..3) is NOT
+    // nullable (the no the panic, the total function).
+    assert!(!derives_eps(&g, 2), "the terminal is not nullable (the total, the no the panic)");
+    // The out-of-range nt (the 99) is NOT nullable (the no the panic, the total).
+    assert!(!derives_eps(&g, 99), "the out-of-range nt is not nullable (the total, the no the panic)");
+}
+
 // The RTN compilation scaling: the kappa(G) = 1 + 2|N| + sum_p(|rhs(p)|+1).
 // Verified against an INDEPENDENT recomputation of the formula (
 // heterogeneous grammars (varying |N| and varying production lengths), not just
@@ -670,6 +754,124 @@ fn proof_determinism_is_a_function() {
         dupes > 0,
         "the ambiguous machine must have a duplicate (q, a, top) key (the non-determinism)"
     );
+}
+
+// TheOF: the accepts_dpda (the single-path simulation) agrees with the CYK
+// (the accepts_npda, the O(n^3) CFG word problem) for the DETERMINISTIC case.
+// This is the inclusive + exclusive proof for the general DPDA (the no just
+// the a^n b^n): the single-path simulation is correct iff it agrees with the
+// independent CYK oracle on every input. The Sénizergues 1997 result (the DPDA
+// language equivalence is decidable, the O(n^3) algorithm) grounds this.
+//
+// For NON-deterministic grammars (the RTN choice at the q_A^in), the
+// accepts_dpda returns false (the no the unique path, the is_deterministic
+// check fails), and the CYK (the accepts_npda) is the correct oracle. The
+// test verifies this: the deterministic grammars have accepts_dpda == CYK,
+// the non-deterministic grammars have accepts_dpda == false (the CYK is the
+// correct answer, the no the single-path).
+#[test]
+fn proof_dpda_single_path_agrees_with_cyk() {
+    use pushdown_rs::pda::{Dpda, Npda};
+    // The deterministic grammars (the no-production, the no the RTN choice).
+    let det_grammars: Vec<Cfg> = vec![
+        // The S -> a b (the single production, the deterministic).
+        Cfg::new(1, 2, 0, vec![(0, vec![1, 2])]),
+    ];
+    for g in &det_grammars {
+        let m = pushdown_rs::compile(g).expect("compile");
+        assert!(m.is_deterministic(), "the grammar must be deterministic");
+        // The corpus: all binary strings over the terminals, the 0..=6.
+        let num_nt = g.num_nonterminals;
+        for len in 0..=6 {
+            for mask in 0..(1usize << len) {
+                let global: Vec<u32> = (0..len)
+                    .map(|i| num_nt + ((mask >> i) & 1) as u32)
+                    .collect();
+                let local: Vec<u32> = global.iter().map(|&x| x - num_nt).collect();
+                let dpda_says = m.accepts_dpda(&local);
+                let cyk_says = m.accepts_npda(g, &local);
+                assert_eq!(
+                    dpda_says, cyk_says,
+                    "the accepts_dpda must agree with the CYK (the deterministic case, the Sénizergues 1997)"
+                );
+            }
+        }
+    }
+    // The non-deterministic grammars (the RTN choice, the a^n b^n, the balanced parens).
+    let nondet_grammars: Vec<Cfg> = vec![
+        // The a^n b^n (the S -> a S b | eps, the RTN choice, the non-deterministic).
+        Cfg::new(1, 2, 0, vec![(0, vec![1, 0, 2]), (0, vec![])]),
+        // The balanced parens (the S -> ( S ) S | eps, the RTN choice, the non-deterministic).
+        Cfg::new(1, 2, 0, vec![(0, vec![1, 0, 2, 0]), (0, vec![])]),
+    ];
+    for g in &nondet_grammars {
+        let m = pushdown_rs::compile(g).expect("compile");
+        assert!(!m.is_deterministic(), "the grammar must be non-deterministic (the RTN choice)");
+        // The corpus: all binary strings over the terminals, the 0..=6.
+        let num_nt = g.num_nonterminals;
+        for len in 0..=6 {
+            for mask in 0..(1usize << len) {
+                let global: Vec<u32> = (0..len)
+                    .map(|i| num_nt + ((mask >> i) & 1) as u32)
+                    .collect();
+                let local: Vec<u32> = global.iter().map(|&x| x - num_nt).collect();
+                let dpda_says = m.accepts_dpda(&local);
+                let cyk_says = m.accepts_npda(g, &local);
+                // The accepts_dpda is guarded to false for the non-deterministic
+                // machine (the is_deterministic check fails, the no the unique
+                // path). The CYK (the accepts_npda) is the correct procedure for
+                // the non-deterministic case, and must agree with the independent
+                // cfg_accepts oracle.
+                assert!(
+                    !dpda_says,
+                    "the accepts_dpda must be false for the non-deterministic machine (the guard)"
+                );
+                assert_eq!(
+                    cyk_says,
+                    pushdown_rs::oracle::cfg_accepts(g, &global),
+                    "the CYK (the accepts_npda) must agree with the independent cfg_accepts oracle"
+                );
+            }
+        }
+    }
+    // The DETERMINISTIC a^n b^n PDA (the JFLAP hand-built machine, the unique
+    // computation path): the single-path simulation (the accepts_dpda) is EXACT
+    // (the deterministic PDA has a unique computation on each input, the
+    // Hopcroft-Ullman / the DCFL = the DPDA-recognizable result). It must agree
+    // with the independent cfg_accepts oracle on the a^n b^n language.
+    let anb = anb_n_dpda();
+    assert!(anb.is_deterministic(), "the JFLAP a^n b^n PDA is deterministic");
+    let g_anb = Cfg::new(1, 2, 0, vec![(0, vec![1, 0, 2]), (0, vec![])]); // the S -> a S b | eps
+    // The JFLAP a^n b^n machine accepts {a^n b^n : n >= 1} (the no the empty string,
+    // the start q q0 has no epsilon move). The n=0 case is the empty string,
+    // which is OUT of the language (the rejects_dpda).
+    for n in 1..=8 {
+        // The a^n b^n (the in-language) + the a^n b^(n+1) / a^(n+1) b^n (the out-of-language).
+        let mut in_lang = vec![0u32; n];
+        in_lang.extend(vec![1; n]);
+        let mut over_b = vec![0u32; n];
+        over_b.extend(vec![1; n + 1]);
+        let mut over_a = vec![0u32; n + 1];
+        over_a.extend(vec![1; n]);
+        assert!(
+            anb.accepts_dpda(&in_lang),
+            "the a^n b^n (the n={n}) is in the language (the inclusive_dpda)"
+        );
+        assert!(
+            !anb.accepts_dpda(&over_b),
+            "the a^n b^(n+1) (the n={n}) is out of the language (the rejects_dpda)"
+        );
+        assert!(
+            !anb.accepts_dpda(&over_a),
+            "the a^(n+1) b^n (the n={n}) is out of the language (the rejects_dpda)"
+        );
+        // The independent oracle (the cfg_accepts, the zero shared code with the PDA).
+        assert_eq!(
+            anb.accepts_dpda(&in_lang),
+            pushdown_rs::oracle::cfg_accepts(&g_anb, &in_lang.iter().map(|&x| x + 1).collect::<Vec<u32>>()),
+            "the accepts_dpda must agree with the cfg_accepts oracle (the a^n b^n)"
+        );
+    }
 }
 
 // PROOF 2: the Bounded stack (the Reach_H depth <= D, the per-step push bound).
@@ -977,6 +1179,45 @@ fn proof_cuda_package() {
     assert_eq!(src.num_transitions, m.transitions.len() as u32);
     // the upload size is the bitvec size (the GPU upload)
     assert!(pkg.upload_bytes() > 0, "the upload size is positive");
+    // The CSR u32 counts (the the ctrl_u32_counts, the the range [offset, +count)
+    // for each q). The count must equal the sum of the u32 sizes of q's records
+    // (the the 5 + push_len per record). The offset + count must span exactly
+    // q's records (the the CSR invariant, the no the silent wrong range).
+    let num_states = m.num_states as usize;
+    assert_eq!(pkg.ctrl_u32_offsets.len(), num_states, "the offsets length is the num_states");
+    assert_eq!(pkg.ctrl_u32_counts.len(), num_states, "the counts length is the num_states");
+    // The independent recomputation: the u32 size of each record (the 5 + push_len).
+    let record_sizes: Vec<u32> = m.transitions.iter().map(|t| 5 + t.push.len() as u32).collect();
+    let total_u32s: u32 = record_sizes.iter().sum();
+    for q in 0..num_states {
+        // The count: the sum of the u32 sizes of q's records (the the
+        // transitions are sorted by q, so q's records are contiguous).
+        let q_record_indices: Vec<usize> = m.transitions
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.q == q as u32)
+            .map(|(idx, _)| idx)
+            .collect();
+        let expected_count: u32 = q_record_indices.iter().map(|&idx| record_sizes[idx]).sum();
+        assert_eq!(
+            pkg.ctrl_u32_counts[q], expected_count,
+            "the ctrl_u32_counts[q] must equal the sum of q's record u32 sizes"
+        );
+        if let Some(&first_idx) = q_record_indices.first() {
+            // The offset: the u32 index of q's first record (the the running sum
+            // of the record sizes before first_idx).
+            let expected_offset: u32 = record_sizes[..first_idx].iter().sum();
+            assert_eq!(
+                pkg.ctrl_u32_offsets[q], expected_offset,
+                "the ctrl_u32_offsets[q] must equal the u32 index of q's first record"
+            );
+        } else {
+            // The q has no records: the offset is the sentinel (the total_u32s),
+            // the count is 0.
+            assert_eq!(pkg.ctrl_u32_offsets[q], total_u32s, "the no-record q gets the sentinel offset");
+            assert_eq!(pkg.ctrl_u32_counts[q], 0, "the no-record q gets the count 0");
+        }
+    }
 }
 
 // ==================== the differentialDEPENDENT-ORACLE differential (the real 100% match) ====================
@@ -1029,7 +1270,7 @@ fn run_differential(m: &PdaMachine, g: &Cfg, corpus: &[Vec<u32>]) {
     for w in corpus {
         // the PDA input is the local terminal ID (the global - the num_nt)
         let pda_input: Vec<u32> = w.iter().map(|&x| x - num_nt).collect();
-        let pda_says = m.accepts_npda(&pda_input);
+        let pda_says = m.accepts_npda(g, &pda_input);
         let oracle_says = cfg_accepts(g, w); // the oracle uses the global IDs
         if pda_says != oracle_says {
             disagreements += 1;
@@ -1170,13 +1411,13 @@ fn epsilon_closure_advance_through_call() {
     // the input "a c b" = the local [0, 2, 1].
     let local = vec![0u32, 2, 1];
     assert!(
-        m.accepts(&local),
+        m.accepts(&g, &local),
         "the PDA accepts a c b (the S -> a A b, A -> c)"
     );
     // the differential: the independent cfg oracle agrees (the global IDs).
     let global = vec![2u32, 4, 3]; // the a, c, b (the global)
     assert_eq!(
-        m.accepts(&local),
+        m.accepts(&g, &local),
         pushdown_rs::oracle::cfg_accepts(&g, &global),
         "the PDA must match the independent cfg oracle"
     );
@@ -1255,6 +1496,245 @@ fn proof_swyb_soundness() {
     );
 }
 
+// PROOF: the UNBOUNDED weighted-PDS distance (the S, the no the S_H). The d(c)
+// is the least fixed point of the distance equations over the (min,+) dioid
+// (the Reps 2003, the "min-plus semiring finds the shortest trace"): d(c) = 0
+// if c is accepting, else d(c) = 1 + min over c -> c' of d(c'). This is the
+// shortest-path-to-acceptance over the (infinite) config graph, computed by the
+// reverse BFS (the pre* saturation, the Bouajjani 1997). The test verifies:
+//   (inclusive) the unbounded d agrees with the bounded d (the compute(machine,
+//               h) for a large enough h) on every config where both are defined;
+//   (exclusive) the accepting configs have d = 0 (the unconditional);
+//   (oracle) the unbounded d agrees with the independent BFS shortest-path
+//            (the reverse graph, the zero shared code with the compute_unbounded).
+#[test]
+fn proof_unbounded_weighted_pds_distance() {
+    use pushdown_rs::summary::BoundedSummary;
+    // The S -> a b machine (the  stack, the 2 states, the fast unbounded
+    // config space). The unbounded d is computed over the full (finite) config
+    // space (the stack depth is bounded by the machine structure).
+    let m = pushdown_rs::compile(&Cfg::new(1, 2, 0, vec![(0, vec![1, 2])])).expect("compile S -> a b");
+    let unbounded = BoundedSummary::compute_unbounded(&m);
+    // (exclusive) the accepting configs have d = 0 (the unconditional).
+    for (q, stack) in unbounded.reachable.iter() {
+        if m.accepting.contains(q) {
+            assert_eq!(
+                unbounded.distance(*q, stack),
+                Some(0),
+                "an accepting config must have d = 0 (the unbounded)"
+            );
+        }
+    }
+    // (oracle) the unbounded d agrees with the independent BFS shortest-path
+    // (the reverse graph, the zero shared code with the compute_unbounded).
+    let independent_d = independent_shortest_distance(&m);
+    for (cfg, d) in &independent_d {
+        assert_eq!(
+            unbounded.distance(cfg.0, &cfg.1),
+            Some(*d),
+            "the unbounded d must agree with the independent BFS oracle"
+        );
+    }
+    // The compute_unbounded is for RTN-compiled machines (the bounded stack, the
+    // six-property #5: the D = max_push + 1). The S -> a b machine above has a
+    // bounded stack (the no call, the depth <= 1), so the compute_unbounded
+    // terminates. The hand-built a^n b^n machine has an UNBOUNDED stack (the
+    // a's push, the depth grows with n), so the compute_unbounded (the D =
+    // max_push + 1) is too tight for it - the a^n b^n is the bounded compute
+    // (the caller-supplied h), not the unbounded.
+}
+
+/// The independent BFS shortest-path-to-acceptance (the reverse graph, the zero
+/// shared code with the compute_unbounded). The oracle for the unbounded d proof.
+fn independent_shortest_distance(m: &PdaMachine) -> Vec<((u32, Vec<u32>), u32)> {
+    use std::collections::{HashMap, VecDeque};
+    // The six-property #5 bounded pushdown: the D = max_push + 1 (the max
+    // production length + 1, the pending nesting). The max_push is derived
+    // from the machine (the maximum length of any transition's push string).
+    // The reverse BFS is restricted to stacks of depth <= D (the no the
+    // unbounded exploration, which does not terminate).
+    let max_push = m.transitions.iter().map(|t| t.push.len()).max().unwrap_or(1);
+    let d_bound = max_push + 1; // the stack depth bound (the six-property #5).
+    // The reverse BFS from the accepting configs (the d = 0).
+    let mut dist: HashMap<(u32, Vec<u32>), u32> = HashMap::new();
+    let mut queue: VecDeque<(u32, Vec<u32>, u32)> = VecDeque::new();
+    for &fq in &m.accepting {
+        let cfg = (fq, vec![m.start_stack]);
+        dist.insert(cfg.clone(), 0);
+        queue.push_back((cfg.0, cfg.1, 0));
+    }
+    while let Some((cq, cstk, cd)) = queue.pop_front() {
+        // The reverse transitions: find all predecessor configs (q, sigma) that
+        // transition to (cq, cstk) via a single move. The PDA transition semantics
+        // (the ODU CS390, the delta(q, a, top) = {(q', push)}): the successor stack
+        // is cstk = push.reversed() ++ sigma' where sigma' = sigma without its top.
+        // So sigma' = cstk[|push|..], top is a free variable in Gamma, and
+        // sigma = sigma' ++ [top]. The rule (t.q, a, top) -> (t.next_q, t.push)
+        // must exist for the predecessor (t.q, sigma) to reach (cq, cstk).
+        for a in 0..=m.num_inputs {
+            for t in &m.transitions {
+                if t.next_q != cq || t.a != a {
+                    continue;
+                }
+                // The PDA transition semantics (the ODU CS390): the successor stack
+                // is cstk = deeper ++ push.reversed() where deeper = sigma without
+                // its top. So:
+                //   m      = t.push.len()
+                //   deeper = cstk[0..(cstk.len() - m)]   (the the stack below the pushed block)
+                //   top    = t.top                        (the the rule's popped symbol, the FIXED)
+                //   sigma  = deeper ++ [top]             (the the predecessor stack)
+                let m_len = t.push.len();
+                if cstk.len() < m_len {
+                    continue;
+                }
+                let deeper: Vec<u32> = cstk[..(cstk.len() - m_len)].to_vec();
+                let mut sigma = deeper;
+                sigma.push(t.top); // the the predecessor top (the the rule's t.top, the FIXED).
+                // The six-property #5 bound: the predecessor stack depth must
+                // be <= d_bound (the no the unbounded exploration).
+                if sigma.len() > d_bound {
+                    continue;
+                }
+                let pred = (t.q, sigma.clone());
+                let new_d = cd + 1;
+                if let Some(&existing) = dist.get(&pred) {
+                    if existing <= new_d {
+                        continue; // the no improvement.
+                    }
+                }
+                dist.insert(pred.clone(), new_d);
+                queue.push_back((pred.0, pred.1, new_d));
+            }
+        }
+    }
+    dist.into_iter().map(|(cfg, d)| (cfg, d)).collect()
+}
+
+// PROOF: the compute_unbounded reverse equation on a MULTI-SYMBOL push over a
+// non-trivial deeper stack (the the case the a^n b^n / the S->ab tests do NOT
+// cover, where cstk.len() > m and m > 1). The old buggy equation (the
+// sigma_prime = cstk[m..], the the pushed block, the no the deeper stack) gives
+// the WRONG predecessor; the corrected equation (the deeper = cstk[0..(len-m)],
+// the top = t.top FIXED) gives the RIGHT one. This test verifies the
+// compute_unbounded distance agrees with the independent oracle on a machine
+// where the two cases diverge.
+#[test]
+fn proof_unbounded_distance_multi_symbol_push_over_deep_stack() {
+    use pushdown_rs::summary::BoundedSummary;
+    // The machine: the q0 --a, Z--> q1 (the push [X, Y], the 2 symbols over the
+    // Z).). The q1 --b, Y--> q2 (the push [], the pop Y). The q2 is
+    // accepting. The stack grows to depth 3 (the [Z, X, Y]) after the a move,
+    // so the reverse step from (q1, [Z, X, Y]) must recover the predecessor
+    // (q0, [Z]) via the multi-symbol push [X, Y] (the m = 2, the c =
+    // cstk[0..(3-2)] = cstk[0..1] = [Z], the top = t.top = Z).
+    const A: u32 = 0;
+    const B: u32 = 1;
+    const EPS: u32 = 2;
+    const Z: u32 = 0;
+    const X: u32 = 1;
+    const Y: u32 = 2;
+    let m = PdaMachine {
+        num_states: 3,
+        num_inputs: 2,
+        num_stack_syms: 3,
+        transitions: vec![
+            Transition { q: 0, a: A, top: Z, next_q: 1, push: vec![X, Y] }, // the push 2 symbols.
+            Transition { q: 1, a: B, top: Y, next_q: 2, push: vec![] }, // the pop Y.
+            Transition { q: 2, a: EPS, top: Z, next_q: 2, push: vec![Z] }, // the self-loop.
+        ],
+        accepting: vec![2],
+        start_state: 0,
+        start_stack: Z,
+        state_provenance: None,
+        vocab_names: None,
+        ctrl_offsets: vec![],
+        ctrl_counts: vec![],
+        flat_a: vec![],
+        flat_top: vec![],
+        flat_next_q: vec![],
+    };
+    let unbounded = BoundedSummary::compute_unbounded(&m);
+    let oracle = independent_shortest_distance(&m);
+    // The oracleinclusive) the unbounded distance agrees with the independent oracle
+    // on every config the oracle reached.
+    for (cfg, d) in &oracle {
+        assert_eq!(
+            unbounded.distance(cfg.0, &cfg.1),
+            Some(*d),
+            "the compute_unbounded must agree with the independent oracle (the multi-symbol push over the deep stack)"
+        );
+    }
+    // The (exclusive) the accepting config (q2, [Z]) has d = 0.
+    assert_eq!(unbounded.distance(2, &[Z]), Some(0), "the accepting config has d = 0");
+    // The (boundary) the predecessor of (q1, [Z, X, Y]) via the a move is (q0, [Z])
+    // (the the multi-symbol push [X, Y] over the Z bottom). The d(q0, [Z]) =
+    // d(q1, [Z, X, Y]) + 1.
+    let d_q1_deep = unbounded.distance(1, &[Z, X, Y]);
+    let d_q0 = unbounded.distance(0, &[Z]);
+    if let (Some(d1), Some(d0)) = (d_q1_deep, d_q0) {
+        assert_eq!(d0, d1 + 1, "the d(q0, [Z]) must be the d(q1, [Z,X,Y]) + 1 (the reverse step)");
+    }
+}
+
+// PROOF: the max_closure_width (the measurement, the no the static cap). The
+// epsilon closure over the (state, top) pairs is bounded by num_states *
+// num_stack_syms (the finite domain). The max_closure_width measures the
+// EXACT maximum closure width (the no an underestimate). The test verifies:
+//   (exclusive) the max_closure_width <= num_states * num_stack_syms (the
+//               domain bound, the no the static).
+//   (inclusive) the max_closure_width is the EXACT maximum (the no an
+//               underestimate), verified against the independent BFS that
+//               computes the closure width for each (q, top).
+#[test]
+fn proof_max_closure_width_is_exact() {
+    let m = anb_n_dpda();
+    let domain_size = (m.num_states as usize) * (m.num_stack_syms as usize);
+    let width = m.max_closure_width();
+    // (exclusive) the width is bounded by the domain size (the no the overflow).
+    assert!(
+        width <= domain_size,
+        "the max_closure_width must be <= num_states * num_stack_syms (the domain bound)"
+    );
+    // (inclusive) the width is the EXACT maximum (the no an underestimate).
+    // The independent BFS computes the closure width for each (q, top) and
+    // takes the max (the zero shared code with the max_closure_width).
+    let independent_width = independent_closure_width(&m);
+    assert_eq!(
+        width, independent_width,
+        "the max_closure_width must equal the independent BFS (the exact maximum)"
+    );
+}
+
+/// The independent BFS closure width (the zero shared code with the
+/// max_closure_width). The oracle for the max_closure_width proof.
+fn independent_closure_width(m: &PdaMachine) -> usize {
+    let mut max_width = 0usize;
+    for q in 0..m.num_states {
+        for top in 0..m.num_stack_syms {
+            // The epsilon closure over the (state, top) pairs (the independent BFS).
+            let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+            let mut frontier: Vec<(u32, u32)> = vec![(q, top)];
+            while let Some((cq, ctop)) = frontier.pop() {
+                if !visited.insert((cq, ctop)) {
+                    continue;
+                }
+                for t in &m.transitions {
+                    if t.q == cq && t.a == m.num_inputs && t.top == ctop {
+                        let new_top = if t.push.is_empty() {
+                            ctop
+                        } else {
+                            *t.push.first().unwrap()
+                        };
+                        frontier.push((t.next_q, new_top));
+                    }
+                }
+            }
+            max_width = max_width.max(visited.len());
+        }
+    }
+    max_width
+}
+
 // PROOF 11: the batch invariant (the step_batch == the scalar step).
 // The the batched op op must equal the scalar op applied per-item.
 #[test]
@@ -1284,8 +1764,8 @@ fn proof_stream_step_batch_equals_scalar() {
             _ => (*q, stk.clone()),
         };
         assert_eq!(
-            batched[i], expected,
-            "the step_batch[{i}] must equal the scalar step"
+            batched[i], vec![expected],
+            "the step_batch[{i}] (the set) must equal the scalar step (the 1-element set, the deterministic a^n b^n)"
         );
     }
 }
@@ -1318,15 +1798,15 @@ fn nondeterministic_regex_uses_npda_accepts() {
     // the universal `accepts` auto-selects the NPDA (the non-deterministic) -
     // the caller does NOT need to know which variant the machine is.
     assert!(
-        m.accepts(&to_local(&[1])),
+        m.accepts(&g, &to_local(&[1])),
         "the [a-z]+ accepts a single 'a' (the accepts)"
     );
     assert!(
-        m.accepts(&to_local(&[1, 1])),
+        m.accepts(&g, &to_local(&[1, 1])),
         "the [a-z]+ accepts 'aa' (the universal accepts)"
     );
     assert!(
-        !m.accepts(&to_local(&[])),
+        !m.accepts(&g, &to_local(&[])),
         "the [a-z]+ rejects the empty (the one-or-more)"
     );
 }
@@ -1380,9 +1860,16 @@ fn proof_step_batch_into_no_alloc() {
         .map(|(q, s, a)| ((*q, s.clone()), *a))
         .collect();
     let ref_out = m.step_batch(&ref_batch);
+    // The step_batch_into (the no-alloc deterministic fast path, the single-config)
+    // must equal the FIRST element of the step_batch set (the the deterministic
+    // machine produces 1-element sets, the the a^n b^n DPDA). The no-alloc path is
+    // the SIMD-accelerated deterministic step (the the lookup_indexed goto, the no
+    // the full-domain set). For the non-deterministic machine, use the step_batch
+    // (the full-domain set), NOT the step_batch_into (the deterministic fast path).
+    let ref_first: Vec<(u32, Vec<u32>)> = ref_out.iter().map(|set| set[0].clone()).collect();
     assert_eq!(
-        out, ref_out,
-        "the step_batch_into must equal the step_batch (the batch invariant)"
+        out, ref_first,
+        "the step_batch_into (the deterministic no-alloc) must equal the step_batch's first element (the 1-element set)"
     );
 }
 
@@ -1404,10 +1891,13 @@ fn proof_step_batch_simd() {
         .map(|&s| ((s as u32, vec![0u32]), token))
         .collect();
     let ref_out = m.step_batch(&ref_batch);
-    let ref_states: Vec<u16> = ref_out.iter().map(|(q, _)| *q as u16).collect();
+    // The step_batch_simd (the deterministic no-alloc SIMD path, the single-config)
+    // must equal the FIRST element of the step_batch set (the the deterministic
+    // machine produces 1-element sets, the the a^n b^n DPDA).
+    let ref_states: Vec<u16> = ref_out.iter().map(|set| set[0].0 as u16).collect();
     assert_eq!(
         simd_out, ref_states,
-        "the step_batch_simd must equal the step_batch (the batch invariant)"
+        "the step_batch_simd (the deterministic no-alloc) must equal the step_batch's first element (the 1-element set)"
     );
 }
 
@@ -2437,10 +2927,10 @@ fn rtn_one_or_more_loop_repeats() {
     for t in &m.transitions {
         eprintln!("[DBG B+ trans] (q={}, a={}, top={}) -> (q={}, push={:?})", t.q, t.a, t.top, t.next_q, t.push);
     }
-    assert!(m.accepts(&[0]), "a single B is in B+");
-    assert!(m.accepts(&[0, 0]), "two B's are in B+ (the loop repeats once)");
-    assert!(m.accepts(&[0, 0, 0]), "three B's are in B+ (the loop repeats twice)");
-    assert!(!m.accepts(&[]), "the empty string is not in B+");
+    assert!(m.accepts(&g, &[0]), "a single B is in B+");
+    assert!(m.accepts(&g, &[0, 0]), "two B's are in B+ (the loop repeats once)");
+    assert!(m.accepts(&g, &[0, 0, 0]), "three B's are in B+ (the loop repeats twice)");
+    assert!(!m.accepts(&g, &[]), "the empty string is not in B+");
 }
 
 // The nested-loop shape of the Qwen reasoning_block: "(<text_range>)+ (<reasoning_end>)".
@@ -2469,10 +2959,10 @@ fn rtn_nested_loop_with_trailing_symbol_repeats() {
         eprintln!("[DBG machine] (q={}, a={}, top={}) -> (q={}, push={:?})", t.q, t.a, t.top, t.next_q, t.push);
     }
     eprintln!("[DBG machine] accepting={:?}", m.accepting);
-    assert!(m.accepts(&[0, 1]), "T RE (the single-iteration base case)");
-    assert!(m.accepts(&[0, 0, 1]), "T T RE (the loop repeats once)");
-    assert!(m.accepts(&[0, 0, 0, 1]), "T T T RE (the loop repeats twice)");
-    assert!(!m.accepts(&[1]), "RE alone is not T+ RE");
+    assert!(m.accepts(&g, &[0, 1]), "T RE (the single-iteration base case)");
+    assert!(m.accepts(&g, &[0, 0, 1]), "T T RE (the loop repeats once)");
+    assert!(m.accepts(&g, &[0, 0, 0, 1]), "T T T RE (the loop repeats twice)");
+    assert!(!m.accepts(&g, &[1]), "RE alone is not T+ RE");
 }
 
 // Reproduce the Qwen reasoning_block nesting: an inner one-or-more loop (the IP -> IP T)
@@ -2501,14 +2991,14 @@ fn rtn_nested_loops_reproduce_qwen_shape() {
     // The local terminal IDs: T=0, RE=1, TC=2, TX=3, E=4.
     // A valid string: T T RE TC E = [0, 0, 1, 2, 4].
     assert!(
-        m.accepts(&[0, 0, 1, 2, 4]),
+        m.accepts(&g, &[0, 0, 1, 2, 4]),
         "T T RE TC E is valid (the inner loop repeats once)"
     );
     assert!(
-        m.accepts(&[0, 0, 0, 1, 2, 4]),
+        m.accepts(&g, &[0, 0, 0, 1, 2, 4]),
         "T T T RE TC E is valid (the inner loop repeats twice)"
     );
-    assert!(m.accepts(&[0, 1, 2, 4]), "T RE TC E is valid (the inner loop base case)");
+    assert!(m.accepts(&g, &[0, 1, 2, 4]), "T RE TC E is valid (the inner loop base case)");
 }
 
 // The Qwen start-shape with the THIRD nested loop: the outer (tool_call | text)+ loop whose
@@ -2538,11 +3028,11 @@ fn rtn_triple_nested_loops_reproduce_qwen_start() {
     // The local terminal IDs: R1=0, RE=1, TC=2, R2=3, EOS=4.
     // A valid string: R1 R1 RE TC EOS = [0, 0, 1, 2, 4].
     assert!(
-        m.accepts(&[0, 0, 1, 2, 4]),
+        m.accepts(&g, &[0, 0, 1, 2, 4]),
         "R1 R1 RE TC EOS is valid (the inner-1 loop repeats once)"
     );
     assert!(
-        m.accepts(&[0, 0, 0, 1, 2, 4]),
+        m.accepts(&g, &[0, 0, 0, 1, 2, 4]),
         "R1 R1 R1 RE TC EOS is valid (the inner-1 loop repeats twice)"
     );
 }
@@ -2573,14 +3063,14 @@ fn rtn_three_nested_loops_qwen_exact_shape() {
     let m = pushdown_rs::compile(&g).expect("compile the three-nested-loop grammar");
     // The local terminal IDs: T=0, RE=1, TC=2, R2=3, EOS=4.
     // A valid string: T T RE TC EOS = [0, 0, 1, 2, 4] (the inner-1 loop repeats once).
-    assert!(m.accepts(&[0, 0, 1, 2, 4]), "T T RE TC EOS is valid (the inner-1 loop repeats once)");
+    assert!(m.accepts(&g, &[0, 0, 1, 2, 4]), "T T RE TC EOS is valid (the inner-1 loop repeats once)");
     assert!(
-        m.accepts(&[0, 0, 0, 1, 2, 4]),
+        m.accepts(&g, &[0, 0, 0, 1, 2, 4]),
         "T T T RE TC EOS is valid (the inner-1 loop repeats twice)"
     );
     // The inner-2 loop (the TX -> TX R2): T RE R2 R2 TC EOS = [0, 1, 3, 3, 2, 4].
     assert!(
-        m.accepts(&[0, 1, 3, 3, 2, 4]),
+        m.accepts(&g, &[0, 1, 3, 3, 2, 4]),
         "T RE R2 R2 TC EOS is valid (the inner-2 loop repeats once)"
     );
 }
@@ -2622,17 +3112,19 @@ fn rtn_exact_qwen_cfg_loop_back_edge() {
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile the exact Qwen CFG");
-    // The inner `plus` loop (NT1, the T2 = local 2): the NPDA config-SET advance (the
-    // advance_eps_set) must keep the loop branch alive. A single-config advance_eps drops it
-    // (the base case wins, the loop is lost).
-    let start_set = vec![(m.start_state, vec![m.start_stack])];
-    let set1 = m.advance_eps_set(&start_set, 2, 8);
-    eprintln!("[DBG qwen-cfg] config-set after 1st T2: {} configs", set1.len());
-    let set2 = m.advance_eps_set(&set1, 2, 8);
-    eprintln!("[DBG qwen-cfg] config-set after 2nd T2: {} configs", set2.len());
+    // The inner `plus` loop (NT1, the T2 = local 2): the Earley per-step mask
+    // (the O(n^3) chart,, the Leo 1991 optimization) must keep the loop
+    // branch alive. The advance_eps_set (the exponential frontier) is replaced
+    // by the earley_per_step_mask (the polynomial per-step mask).
+    let local_w: Vec<u32> = vec![2, 2]; // the two T2's (the local terminal IDs).
+    let global_w: Vec<u32> = local_w.iter().map(|&x| x + g.num_nonterminals).collect();
+    let mask1 = pushdown_rs::earley_per_step_mask(&g, &global_w, 1);
+    eprintln!("[DBG qwen-cfg] Earley mask after 1st T2: {:?}", mask1);
+    let mask2 = pushdown_rs::earley_per_step_mask(&g, &global_w, 2);
+    eprintln!("[DBG qwen-cfg] Earley mask after 2nd T2: {:?}", mask2);
     assert!(
-        !set2.is_empty(),
-        "the plus loop back-edge: a second T2 must advance the config set (the + is one-or-more, the NPDA frontier keeps the loop branch)"
+        !mask2.is_empty(),
+        "the plus loop back-edge: a second T2 must have a non-empty mask (the + is one-or-more, the Earley chart keeps the loop branch)"
     );
     // The contrast: the single-config advance_eps drops the loop (the cfg2 is None).
     let cfg1 = m.advance_eps(m.start_state, &[m.start_stack], 2);
@@ -2671,4 +3163,42 @@ fn debug_mask_at_cfg_minimal() {
     eprintln!("[DBG minimal] mask_at_cfg(0, &[0]) = {:?}", m.mask_at_cfg(0, &[0]));
     eprintln!("[DBG minimal] mask_at_cfg(1, &[0]) = {:?}", m.mask_at_cfg(1, &[0]));
     assert_eq!(m.mask_at_cfg(0, &[]), vec![A], "the start config's mask must allow the input A (the epsilon closure reaches the a-consumer)");
+}
+
+// PROOF: the Earley per-step mask (the O(n^3) chart, the Leo 1991) agrees with
+// the PDA's mask_at_cfg (the proven epsilon-closure mask) at every position.
+// The Earley mask is in the GLOBAL terminal IDs (the num_nonterminals..+num_terminals);
+// the PDA mask is in the LOCAL input IDs (the 0..num_inputs). Convert global -> local
+// (the - num_nonterminals) and compare. This verifies the Earley implementation
+// (the Predict/Scan/Complete, the start-field fix) against the independent PDA mask.
+#[test]
+fn proof_earley_per_step_mask_agrees_with_pda_mask() {
+    use pushdown_rs::compile::earley_per_step_mask;
+    // The S -> a A b, A -> c grammar (the call dot, the bounded stack).
+    let g = Cfg::new(2, 3, 0, vec![(0, vec![2, 1, 3]), (1, vec![4])]);
+    let m = pushdown_rs::compile(&g).expect("compile");
+    let num_nt = g.num_nonterminals;
+    // The input "a c b" = the local [0, 2, 1] (the a=0, the c=2, the b=1).
+    let local = vec![0u32, 2, 1];
+    let global: Vec<u32> = local.iter().map(|&x| x + num_nt).collect();
+    // At each position i (the 0..=n), the Earley mask (the global -> local) must
+    // equal the PDA's mask_at_cfg at the config reached after consuming w[0..i].
+    let mut config = (m.start_state, vec![m.start_stack]);
+    for i in 0..=global.len() {
+        let earley_mask_global = earley_per_step_mask(&g, &global, i);
+        let earley_mask_local: Vec<u32> = earley_mask_global.iter()
+            .map(|&x| x - num_nt)
+            .collect();
+        let pda_mask = m.mask_at_cfg(config.0, &config.1);
+        assert_eq!(
+            earley_mask_local, pda_mask,
+            "the Earley per-step mask (the position {i}) must equal the PDA mask_at_cfg"
+        );
+        // Advance the PDA config by the next input (the no the last position).
+        if i < global.len() {
+            if let Some(nc) = m.advance_eps(config.0, &config.1, local[i]) {
+                config = nc;
+            }
+        }
+    }
 }

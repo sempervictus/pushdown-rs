@@ -129,6 +129,16 @@ impl PdaMachine {
                 push,
             });
         }
+        // The CSR invariant (the the ctrl_offsets + the ctrl_counts, the first-
+        // occurrence + count) requires the transitions to be SORTED by (q, a, top)
+        // (the the per-state contiguity). The to_bitvec writes the machine's
+        // transitions in their stored order (the sorted, the via the new / the
+        // compile), so a well-formed bitvec is already sorted. But a hand-crafted
+        // or corrupted bitvec may NOT be, so the from_bitvec re-sorts to ensure
+        // the CSR invariant holds (the no the silent wrong CSR, the R2 exhaustive
+        // domain coverage). The sort is a reordering (the the transition set is
+        // unchanged), so the language + the identity chain are preserved.
+        transitions.sort_by_key(|t| (t.q, t.a, t.top));
         // the optional provenance suffix (the flag + the entries). The flag is 1 for an
         // RTN-compiled machine (num_states entries follow) and 0 for a hand-built
         // one (no entries). Any other value is treated as "absent" (the malformed

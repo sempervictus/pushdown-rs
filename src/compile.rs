@@ -12,6 +12,7 @@
 //! (the Definition 10 + the Lemma 2 of the paper).
 
 use crate::machine::{PdaMachine, Transition};
+use std::collections::HashSet;
 
 /// An abstract finite-state grammar (the CFG G = (N, Sigma, P, S)) of ANY sort.
 /// The associated types let any concrete grammar (the Lark, the JSON schema, the
@@ -309,6 +310,261 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
         flat_top: transitions.iter().map(|t| t.top).collect(),
         flat_next_q: transitions.iter().map(|t| t.next_q).collect(),
     })
+}
+
+/// The CYK algorithm (the O(n^3) decidable word problem for context-free
+/// languages, the Hopcroft-Ullman). Given a CFG G = (N, Sigma, P, S) and a
+/// string w of length n (the GLOBAL symbol IDs, the terminals are
+/// num_nonterminals..num_nonterminals+num_terminals), builds the table
+/// V[i][j] = the set of nonterminals A with A =>* w[i..i+j]. Accepts iff
+/// S in V[0][n].
+///
+/// FULL k-ary coverage (the no the binary-only stub): every production
+/// A -> [s1..sm] (the m >= 0) is handled by a partition DP (the split of
+/// w[i..i+j] into m consecutive, possibly-empty, spans, one per symbol).
+/// The subsumes the epsilon (the m=0), the terminal (the m=1, the s1 a
+/// terminal), the unit (the m=1, the s1 a nonterminal), the binary (the m=2),
+/// and the k-ary (the m>=2) cases. The fixpoint over the productions resolves
+/// the unit + the chain dependencies (the A -> B -> C).
+pub fn cyk_accepts(g: &Cfg, w: &[u32]) -> bool {
+    let n = w.len();
+    let num_nt = g.num_nonterminals as usize;
+    if num_nt == 0 {
+        return false;
+    }
+    // The empty input (the n = 0): accepts iff the start derives eps (the
+    // epsilon closure, the no CYK table needed).
+    if n == 0 {
+        return derives_eps(g, g.start);
+    }
+    // V[i][j] = the bitset of nonterminals A with A =>* w[i..i+j] (the j is the
+    // span length, the 0..=n). The n >= 1 here. The table has n+1 rows (the i
+    // in 0..=n) so the partition DP's span start p = i + pos can reach n.
+    let mut v: Vec<Vec<Vec<bool>>> = vec![vec![vec![false; num_nt]; n + 1]; n + 1];
+    // The CYK fixpoint (the monotone OR over the V × the (i,j) cells).
+    // The productions are independent (each writes to its own lhs index, the no
+    // the data race). The sequential fixpoint (the no the rayon, the mutable v
+    // writes are the FnMut, the no the Fn closure).
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (lhs, rhs) in &g.productions {
+            let a = *lhs as usize;
+            let m = rhs.len();
+            for i in 0..=n {
+                for j in 0..=n - i {
+                    if v[i][j][a] {
+                        continue; // already derived (the monotone fixpoint).
+                    }
+                    // The partition DP: cover[t][pos] = "the symbols rhs[t..m]
+                    // cover w[i+pos..i+j]". The base is cover[m][j] = true (the
+                    // all symbols consumed, the span reached its end).
+                    let mut cover: Vec<Vec<bool>> = vec![vec![false; j + 1]; m + 1];
+                    cover[m][j] = true;
+                    for t in (0..m).rev() {
+                        let s = rhs[t];
+                        for pos in 0..=j {
+                            // Try every span length (the 0..=(j-pos)) for symbol s.
+                            for span in 0..=(j - pos) {
+                                if !cover[t + 1][pos + span] {
+                                    continue;
+                                }
+                                let p = i + pos; // the span start (the global index).
+                                let sym_covers = if s < g.num_nonterminals {
+                                    // A nonterminal s covers w[p..p+span] iff s in V[p][span].
+                                    v[p][span][s as usize]
+                                } else {
+                                    // A terminal s covers w[p..p+span] iff span == 1 and w[p] == s.
+                                    span == 1 && p < n && w[p] == s
+                                };
+                                if sym_covers {
+                                    cover[t][pos] = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if cover[0][0] {
+                        v[i][j][a] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    v[0][n][g.start as usize]
+}
+
+/// The epsilon closure set: the set of nonterminals that derive eps.
+fn derives_eps_set(g: &Cfg) -> Vec<bool> {
+    let num_nt = g.num_nonterminals as usize;
+    let mut eps: Vec<bool> = vec![false; num_nt];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (lhs, rhs) in &g.productions {
+            let a = *lhs as usize;
+            if eps[a] {
+                continue;
+            }
+            let all_eps = rhs.iter().all(|&s| {
+                if s < g.num_nonterminals {
+                    eps[s as usize]
+                } else {
+                    false
+                }
+            });
+            if all_eps {
+                eps[a] = true;
+                changed = true;
+            }
+        }
+    }
+    eps
+}
+
+/// The epsilon closure: does the nonterminal `nt` derive the empty string?
+/// A production A -> [s1..sm] derives eps iff every st derives eps (a terminal
+/// never does). The fixpoint resolves the chains (the A -> B -> eps).
+pub fn derives_eps(g: &Cfg, nt: u32) -> bool {
+    // Total: the nt must be a valid nonterminal (the 0..num_nonterminals). An
+    // out-of-range or terminal nt does not derive eps (the no the panic).
+    if nt >= g.num_nonterminals {
+        return false;
+    }
+    derives_eps_set(g)[nt as usize]
+}
+
+/// The Earley item: (production index, dot position, start position).
+/// The production index identifies the production in g.productions.
+/// The dot position is the index within the rhs (0..=rhs.len()).
+/// The start position is where the production began in the input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EarleyItem {
+    pub prod: usize,
+    pub dot: usize,
+    pub start: usize,
+}
+
+impl EarleyItem {
+    fn next_symbol(&self, g: &Cfg) -> Option<u32> {
+        let rhs = &g.productions[self.prod].1;
+        if self.dot < rhs.len() {
+            Some(rhs[self.dot])
+        } else {
+            None
+        }
+    }
+}
+
+/// The Earley parser (the O(n^3) chart parsing, the Leo 1991 optimization for
+/// LR(k) grammars). Computes the state sets S[0..=n] where S[i] contains all
+/// Earley items representing valid partial parses at position i.
+///
+/// The per-step mask at position i is the set of terminals a such that there
+/// exists an item (p, dot, start) in S[i] with rhs[dot] == a (the terminal at
+/// the dot). This is the allowed inputs at position i.
+///
+/// The three operations (the Wikipedia Earley parser, the PREDICTOR / the
+/// SCANNER / the COMPLETER pseudocode, the Jurafsky-Martin "Speech and
+/// Language Processing"):
+/// - Predict: for (p, dot, origin) in S[k] where rhs[dot] is a nonterminal Y,
+///   add (q, 0, k) for each production q of Y to S[k] (the origin is the
+///   CURRENT position k, the no the item's origin).
+/// - Scan: for (p, dot, origin) in S[k] where rhs[dot] is a terminal a, if
+///   a == w[k], add (p, dot+1, origin) to S[k+1] (the origin is inherited).
+/// - Complete: for (p, dot, origin) in S[k] where dot == rhs.len() (complete),
+///   find all items (q, dot2, origin2) in S[origin] where rhs2[dot2] == lhs_p,
+///   and add (q, dot2+1, origin2) to S[k] (the lookup is in S[origin], the
+///   completed item's origin).
+pub fn earley_parse(g: &Cfg, w: &[u32]) -> Vec<HashSet<EarleyItem>> {
+    let n = w.len();
+    let mut s: Vec<HashSet<EarleyItem>> = (0..=n).map(|_| HashSet::new()).collect();
+
+    // Seed S[0] with the start production (the dot at position 0).
+    // Find the production index for the start symbol.
+    let start_prod = g.productions.iter().position(|(lhs, _)| *lhs == g.start);
+    if let Some(p) = start_prod {
+        s[0].insert(EarleyItem { prod: p, dot: 0, start: 0 });
+    }
+
+    for i in 0..=n {
+        // Process the state set S[i] to closure (the Predict + Complete).
+        let mut queue: Vec<EarleyItem> = s[i].iter().cloned().collect();
+        let mut q = 0;
+        while q < queue.len() {
+            let item = queue[q];
+            q += 1;
+            let rhs = &g.productions[item.prod].1;
+            if item.dot < rhs.len() {
+                let sym = rhs[item.dot];
+                if sym < g.num_nonterminals {
+                    // Predict: add all productions of the nonterminal.
+                    for (q_idx, (lhs, _)) in g.productions.iter().enumerate() {
+if *lhs == sym {
+                              // The Predict: the B derivation begins at the CURRENT
+                              // input position i (the where the dot is, the no the
+                              // item.start which is where the OUTER production began).
+                              // The standard Earley item (A -> alpha . beta, i) carries
+                              // i = the input position where A's derivation began; the
+                              // predicted B begins at the SAME position i (the the dot).
+                              let new_item = EarleyItem { prod: q_idx, dot: 0, start: i };
+                              if s[i].insert(new_item) {
+                                  queue.push(new_item);
+                              }
+                          }
+                    }
+                }
+            } else {
+                // Complete: find items in S[item.start] that expect this lhs.
+                let lhs = g.productions[item.prod].0;
+                let others: Vec<EarleyItem> = s[item.start].iter().cloned().collect();
+                for other in others {
+                    let other_rhs = &g.productions[other.prod].1;
+                    if other.dot < other_rhs.len() && other_rhs[other.dot] == lhs {
+                        let new_item = EarleyItem { prod: other.prod, dot: other.dot + 1, start: other.start };
+                        if s[i].insert(new_item) {
+                            queue.push(new_item);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Scan: if i < n, advance items with terminal at the dot.
+        if i < n {
+            let a = w[i];
+            let items: Vec<EarleyItem> = s[i].iter().cloned().collect();
+            for item in items {
+                if let Some(sym) = item.next_symbol(g) {
+                    if sym >= g.num_nonterminals && sym == a {
+                        let new_item = EarleyItem { prod: item.prod, dot: item.dot + 1, start: item.start };
+                        s[i + 1].insert(new_item);
+                    }
+                }
+            }
+        }
+    }
+
+    s
+}
+
+/// The per-step mask at position i: the set of terminals a such that there
+/// exists an Earley item in S[i] with rhs[dot] == a (the terminal at the dot).
+/// This is the allowed inputs at position i (the mask for constrained decoding).
+pub fn earley_per_step_mask(g: &Cfg, w: &[u32], i: usize) -> Vec<u32> {
+    let s = earley_parse(g, w);
+    let mut mask: HashSet<u32> = HashSet::new();
+    for item in s.get(i).into_iter().flatten() {
+        if let Some(sym) = item.next_symbol(g) {
+            if sym >= g.num_nonterminals {
+                mask.insert(sym);
+            }
+        }
+    }
+    let mut result: Vec<u32> = mask.into_iter().collect();
+    result.sort();
+    result
 }
 
 /// The concrete CFG (the G = (N, Sigma, P, S)) with u32 symbol IDs. The

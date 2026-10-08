@@ -113,7 +113,7 @@ pub use pda::{
     OneWayStack, Npda, Pda, VisiblyPushdown,
 };
 pub use machine::{PdaError, PdaMachine, Transition};
-pub use compile::{Cfg, CfgError, Grammar, NamedCfg, kappa};
+pub use compile::{Cfg, CfgError, Grammar, NamedCfg, kappa, cyk_accepts, derives_eps, earley_parse, earley_per_step_mask, EarleyItem};
 pub use bitvec::BitvecError;
 
 /// Compile an abstract grammar to a PDA machine (the RTN construction).

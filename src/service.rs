@@ -20,9 +20,13 @@ impl PdaService {
     }
 
     /// The device's step (the batch node 2 (step)): the batch of (config, token) ->
-    /// the batch of next-config. The host sends the batch; the device processes
-    /// it in parallel (the SIMD lanes); the host receives the result.
-    pub fn step(&self, batch: &[(u32, Vec<u32>, u32)]) -> Vec<(u32, Vec<u32>)> {
+    /// the batch of next-config SETS. The host sends the batch; the device
+    /// processes it in parallel (the SIMD lanes); the host receives the result.
+    /// Each input config produces a SET of next-configs (the the full-domain
+    /// advance, the advance_eps_set, the no the single-config). The SIMD
+    /// machine produces 1-element sets; the non-deterministic machine produces
+    /// the full frontier.
+    pub fn step(&self, batch: &[(u32, Vec<u32>, u32)]) -> Vec<Vec<(u32, Vec<u32>)>> {
         let configs: Vec<(u32, Vec<u32>)> = batch.iter().map(|(q, s, _)| (*q, s.clone())).collect();
         let tokens: Vec<u32> = batch.iter().map(|(_, _, t)| *t).collect();
         let pairs: Vec<((u32, Vec<u32>), u32)> =

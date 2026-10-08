@@ -10,7 +10,7 @@
 
 use pushdown_rs::compile::{Cfg, NamedCfg, kappa, rtn_state_names};
 use pushdown_rs::machine::{PdaMachine, Transition};
-use pushdown_rs::pda::{Dpda, Npda};
+use pushdown_rs::pda::Dpda;
 use pushdown_rs::viz;
 use std::path::Path;
 
@@ -153,10 +153,9 @@ fn main() {
     println!("\n=== acceptance sanity (the DFA) ===");
     for w in [&[0u32][..], &[1, 0], &[1, 1, 0], &[0, 0]] {
         println!(
-            "  {:?} -> accepts={} (npda={})",
+            "  {:?} -> accepts={} (dpda)",
             w,
-            m_dfa.accepts_dpda(w),
-            m_dfa.accepts_npda(w)
+            m_dfa.accepts_dpda(w)
         );
     }
 

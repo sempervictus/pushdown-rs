@@ -59,11 +59,13 @@ impl PdaGraph {
             bitvec_len: 0, // the filled at the upload
             codebook_len: 0,
             nodes: vec![
-                GraphNode::H2D { bytes: batch * 12 }, // the ctrl + the stack[8] + the sp
+                // The PdaSeqState is ctrl (1 u32) + stack[8] (8 u32s) + sp (1 u32)
+                // = 10 u32s = 40 bytes (the cuda.rs FFI layout, the six-property #5).
+                GraphNode::H2D { bytes: batch * 40 },
                 GraphNode::ComputeMasks { batch },
                 GraphNode::Sample { batch },
                 GraphNode::Advance { batch },
-                GraphNode::D2H { bytes: batch * 12 },
+                GraphNode::D2H { bytes: batch * 40 },
             ],
             edges: vec![
                 (n_h2d, n_masks),
@@ -85,7 +87,9 @@ impl PdaGraph {
             bitvec_len: 0,
             codebook_len: 0,
             nodes: vec![
-                GraphNode::H2D { bytes: batch * 12 },
+                // The PdaSeqState is 40 bytes (the ctrl + the stack[8] + the sp,
+                // the cuda.rs FFI layout, the six-property #5).
+                GraphNode::H2D { bytes: batch * 40 },
                 GraphNode::ProjectMasks { batch, k },
                 GraphNode::D2H { bytes: batch * (k + 1) * 4 },
             ],
@@ -149,8 +153,13 @@ impl PdaGraph {
                         .map(|_| ((state[0], vec![machine.start_stack]), 0u32))
                         .collect();
                     let stepped = machine.step_batch(&batch2);
-                    if let Some((q, _)) = stepped.first() {
-                        state = vec![*q];
+                    // The stepped is the Vec<Vec<Config>> (the set per input). The mock
+                    // tracks a single state (the the first input's first config, the
+                    // canonical representative).
+                    if let Some(set) = stepped.first() {
+                        if let Some((q, _)) = set.first() {
+                            state = vec![*q];
+                        }
                     }
                 }
                 GraphNode::ProjectMasks { batch, k } => {

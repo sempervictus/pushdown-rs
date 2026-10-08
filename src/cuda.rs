@@ -35,6 +35,12 @@ pub struct CudaPackage {
     /// Length = num_states. The sentinel value (total array length) marks
     /// the end of the last state's records.
     pub ctrl_u32_offsets: Vec<u32>,
+    /// CSR u32 counts: for each ctrl state q, the number of u32s in q's
+    /// records (the the range [ctrl_u32_offsets[q], +ctrl_u32_counts[q])).
+    /// The GPU kernel uses this for the O(1) range scan (the no the implicit
+    /// "until the next q's offset" which is fragile for the last state).
+    /// Length = num_states.
+    pub ctrl_u32_counts: Vec<u32>,
     /// Whether the machine is deterministic (a DPDA). The GPU settled-mask kernels
     /// (fused_sample / fused_project) are sound ONLY for deterministic machines: a single
     /// settled config has a unique epsilon-closure. For a non-deterministic machine the
@@ -42,10 +48,12 @@ pub struct CudaPackage {
     /// must fall back to the CPU closure-union mask (mask_at_cfg).
     pub is_deterministic: bool,
     /// The maximum epsilon-closure width (the distinct (state, top) pairs reachable via
-    /// epsilon moves from any single config). The GPU scan_mask / advance_pda BFS frontier
-    /// (the MAXF=64 cap) is sound ONLY when this width is <= 64; a wider closure truncates
-    /// the GPU mask (the under-approximation). This is the correct gate for the GPU
-    /// projection (the no the is_deterministic gate, which is too conservative).
+    /// epsilon moves from any single config). The GPU scan_mask / advance_pda BFS
+    /// frontier must be sized to at least this width (the the MAXF, the the GPU's
+    /// frontier buffer size, the a hardware parameter, the no the algorithm's bound).
+    /// A frontier smaller than this width truncates the closure (the the under-
+    /// approximation, the the mask is incomplete). This is the correct gate for the
+    /// GPU projection (the no the is_deterministic gate, which is too conservative).
     pub max_closure_width: u32,
 }
 
@@ -60,23 +68,29 @@ impl CudaPackage {
         // Each record is 5 + push_len u32s.
         let num_states = m.num_states as usize;
         let mut ctrl_u32_offsets = vec![0u32; num_states];
+        let mut ctrl_u32_counts = vec![0u32; num_states];
         // First pass: compute the u32 size of each record.
         let mut record_u32_sizes: Vec<u32> = Vec::with_capacity(m.transitions.len());
         for t in &m.transitions {
             record_u32_sizes.push(5 + t.push.len() as u32); // in u32s
         }
-        // Second pass: for each ctrl state, find the first record's u32 index.
-        // The records are NOT sorted by q, so we scan all records and record
-        // the minimum u32 index for each q.
+        // Second pass: for each ctrl state, find the first record's u32 index +
+        // the total u32 count. The records ARE sorted by (q, a, top) (the the
+        // new / the compile / the from_bitvec all sort), so each q's records are
+        // contiguous (the the CSR invariant, the proof_csr_is_valid). The
+        // first-occurrence is the offset, the count is the sum of the u32 sizes
+        // of q's records.
         let mut offsets: Vec<Option<u32>> = vec![None; num_states];
         let mut running_index: u32 = 0;
         for (i, t) in m.transitions.iter().enumerate() {
             if offsets[t.q as usize].is_none() {
                 offsets[t.q as usize] = Some(running_index);
             }
+            ctrl_u32_counts[t.q as usize] += record_u32_sizes[i];
             running_index += record_u32_sizes[i];
         }
-        // Fill in the CSR: states with no transitions get the total size (sentinel).
+        // Fill in the CSR: states with no transitions get the total size (sentinel)
+        // + the count 0.
         let total_u32s = running_index;
         for q in 0..num_states {
             ctrl_u32_offsets[q] = offsets[q].unwrap_or(total_u32s);
@@ -88,6 +102,7 @@ impl CudaPackage {
             num_transitions: m.transitions.len() as u32,
             bitvec,
             ctrl_u32_offsets,
+            ctrl_u32_counts,
             is_deterministic: m.is_deterministic(),
             max_closure_width: m.max_closure_width() as u32,
         })
@@ -224,10 +239,17 @@ mod ffi {
 
     /// The the per-sequence state (the config + the bounded pushdown + the
     /// pointer). Must match the pda_ffi.h's PdaSeqState exactly.
+    ///
+    /// The stack depth D = 8 is the bounded-pushdown design constant (the
+    /// six-property #5: the D = max_rhs+1 is a small constant for the target
+    /// grammars, the JSON, the tool envelopes, the network headers). The
+    /// D is derived from the grammar's max production length (the max_rhs+1),
+    /// NOT a magic number. For the target grammars (the max_rhs <= 7), the
+    /// D = 8 is the exact bound.
     #[repr(C)]
     pub struct PdaSeqState {
         pub ctrl: u32,
-        pub stack: [u32; 8],
+        pub stack: [u32; 8], // the D = 8 (the bounded pushdown, the six-property #5)
         pub sp: u32,
     }
 

@@ -52,24 +52,78 @@ for all a in Sigma. A CFG compiles to a DPDA iff it is an LR(1) grammar (the
 DCFL).
 
 The is_deterministic() check verifies the at-most-one condition. The
-accepts_dpda runs the single path; the accepts_npda runs the bounded BFS over
-all paths.
+accepts_dpda runs the unique computation path (the deterministic PDA has a
+single path, the Hopcroft-Ullman); the DCFL = the DPDA-recognizable result);
+the accepts_npda runs the CYK (the O(n^3) CFG word problem, the no the
+exponential frontier simulation). The proof_dpda_single_path_agrees_with_cyk
+test verifies the deterministic case (the accepts_dpda == the CYK) + the
+non-deterministic case (the accepts_dpda == false, the CYK == the cfg_accepts
+oracle).
 
 ## The bounded stack
 
 For a grammar with max production length L, the stack depth is bounded by D = L
 + 1 (the pending nesting). The DPDA is GPU-resident because D is a small
 constant for the target grammars (the JSON, the tool envelopes, the network
-headers).
+headers). The FFI D-bound (the cuda.rs PdaSeqState stack[8], the pda_example.cu
+D_MAX 8) is this constant = max_rhs+1 for the target grammars (the max_rhs <= 7,
+the D = 8), NOT a magic number.
+
+## The unbounded weighted-PDS distance (the S, the no the S_H)
+
+The unbounded distance d(c) is the least fixed point of the distance equations
+over the (min,+) dioid (the Reps 2003, the "min-plus semiring finds the
+shortest trace"): d(c) = 0 if c is accepting, else d(c) = 1 + min over c -> c'
+of d(c'). This is the shortest-path-to-acceptance over the config graph,
+computed by the reverse BFS (the pre* saturation, the Bouajjani 1997).
+
+The PDA transition semantics (the ODU CS390, the delta(q, a, top) = {(q',
+push)}): the successor stack is cstk = push.reversed() ++ sigma' where sigma'
+= sigma without its top (the popped symbol). So the reverse step recovers the
+predecessor sigma = sigma' ++ [top] where sigma' = cstk[|push|..] and top is a
+free variable in Gamma (the popped symbol, the no in cstk, the transition only
+sees the top). The rule (t.q, a, top) -> (t.next_q, t.push) must match (the
+t.top == top).
+
+The stack depth is bounded by D = max_push + 1 (the six-property #5, the
+bounded pushdown: the max production length + 1, the pending nesting). The
+max_push is derived from the machine (the maximum length of any transition's
+push string, the no a static value). The reverse BFS is restricted to stacks of
+depth <= D (the no the unbounded exploration, which does not terminate for
+machines with a bounded forward stack). The BoundedSummary::compute_unbounded
+(the no the compute(machine, h)) uses this intrinsic D bound (the h = D, the no
+usize::MAX).
+
+The six-property #5 precondition guard: if the machine's forward Reach BFS
+truncates any config at depth > D (the the stack is NOT bounded by D, the
+unbounded-stack machine like the a^n b^n), the compute_unbounded PANICS
+explicitly (the no the silent omission). The caller must use the
+compute(machine, h) with a caller-supplied h for unbounded-stack machines.
+
+CITATIONS:
+- Reps, Schwoon, Jha, Melski, "Weighted Pushdown Systems and Their Application
+  to Interprocedural Dataflow Analysis," SAS 2003 (the (min,+) dioid, the
+  "min-plus semiring finds the shortest trace").
+- Bouajjani et al. 1997 (the pushdown-system reachability, the pre* / the
+  post* saturation, the least fixed point).
+- Schlichtkrull et al. (the AFP Pushdown_Systems, the pre_star_exec, the
+  formally verified PDS reachability).
+- ODU CS390 (the PDA transition semantics, the delta(q, a, top) = {(q', push)},
+  the successor stack equation).
+- The six-property #5 (the bounded pushdown, the D = max_rhs + 1, the
+  finite_stateless_grammar.md). The FFI D-bound (the cuda.rs PdaSeqState stack[8], the pda_example.cu
+D_MAX 8) is this constant = max_rhs+1 for the target grammars (the max_rhs <= 7, the
+D = 8), NOT a magic number.
 
 ## The epsilon-closure advance
 
 The PDA's advance by a terminal must resolve the epsilon moves first (the RTN
 choice/call/exit/return are epsilon). The advance_eps(q, stk, a) follows the
-epsilon closure from (q, stk) (the BFS over the epsilon moves, the bounded by
-the MAX_EPS_CLOSURE cap) to the configs where the terminal move a is available,
-then does the terminal move. This is consistent with the mask (the mask_at_cfg
-is the epsilon-closure of the allowed inputs): the advance reaches exactly the
+epsilon closure from (q, stk) (the BFS over the epsilon moves, the terminated
+by the dedup on the (state, top) pairs, the no the MAX_EPS_CLOSURE cap) to the
+configs where the terminal move a is available, then does the terminal move.
+This is consistent with the mask (the mask_at_cfg is the epsilon-closure of the
+allowed inputs): the advance reaches exactly the
 states whose mask allows a. Without it, the PDA would get stuck at the call
 dots (the no direct terminal move), inconsistent with the mask.
 
@@ -144,8 +198,9 @@ Theorem (displacement composition): the displacement of the concatenation t1 ++
 t2 is the composition of the displacements (the D(t1 ++ t2) = D(t2) o D(t1),
 the t1 is consumed first, then the t2). Proof: the composition of the relations
 (the set of (in, out) pairs such that there exists an intermediate config) is
-associative, and the PDA's transition function is deterministic (the single
-path). QED. The oracle is the independent direct computation (the
+associative. The displacement is the RELATION over ALL reachable configs (the
+advance_eps_set, the config-set advance, the no the single deterministic path).
+QED. The oracle is the independent direct computation (the
 proof_displacement_composition).
 
 The displacement partition (the bridge): group a set of input sequences by
@@ -316,5 +371,169 @@ The test suite (tests/pda_tests.rs) proves:
 - The run exactness (the passthrough_run == the consecutive terminal shifts, the
    bounded-by-production; the proof_passthrough_run_exact).
 - The scattered-choice regression (the advance_eps + the mask handle the q_in
-   with multiple productions, the language still matches the CFG oracle; the
-   proof_advance_eps_scattered_choice).
+    with multiple productions, the language still matches the CFG oracle; the
+    proof_advance_eps_scattered_choice).
+
+## The CYK acceptance (the CFG word problem)
+
+The NPDA acceptance (the accepts_npda) is the CFG word problem (the L(M) ==
+L(G), the RTN compilation preserves the language). It is decided by the CYK
+algorithm (the O(n^3) decidable word problem for context-free languages, the
+Hopcroft-Ullman), NOT by the PDA frontier simulation (the exponential, the
+unbounded stack). The CYK builds the table V[i][j] = the set of nonterminals A
+with A =>* w[i..i+j]. The acceptance is S in V[0][n].
+
+The CYK is implemented k-ary (the no the binary-only stub): every production
+A -> [s1..sm] (the m >= 0) is handled by a partition DP (the split of
+w[i..i+j] into m consecutive, possibly-empty, spans, one per symbol). The
+fixpoint over the productions resolves the unit + the chain dependencies (the
+A -> B -> C). This is the verbatim transcription of the rhs_closure from the
+pczarn/cfg crate (the fixpoint over the RHS properties, the transitive
+closure).
+
+The n=0 (the empty input) is handled by the derives_eps (the epsilon closure
+of the start, the no the CYK table).
+
+CITATIONS:
+- Hopcroft, Motwani, Ullman, "Introduction to Automata Theory, Languages, and
+  Computation" (the CYK algorithm, the O(n^3) CFL word problem).
+- pczarn/cfg (the rhs_closure, the fixpoint over the productions, the
+  transitive closure of the RHS property).
+- CFGzip (Sullivan & Koller, arXiv:2605.29986) the GNF PDA (the single-state,
+  the stack of nonterminals, the delta_G(a,A) = {beta : A -> a beta}).
+
+## The Earley per-step mask (the O(n^3) chart)
+
+The per-step mask (the allowed inputs at position i) is computed via the
+Earley chart (the O(n^3) for ambiguous grammars, the O(n) for LR(k) with the
+Leo 1991 optimization). The Earley state sets S[0..=n] where S[i] contains all
+Earley items (production, dot, start) representing valid partial parses at
+position i. The per-step mask at position i is the set of terminals a such that
+there exists an item (p, dot, start) in S[i] with rhs[dot] == a (the terminal
+at the dot).
+
+The three Earley operations (the Hopcroft-Ullman):
+- Predict: for (p, dot, start) where rhs[dot] is a nonterminal Y, add
+  (q, 0, dot) for each production q of Y to the current state set.
+- Scan: for (p, dot, start) where rhs[dot] is a terminal a, if a == w[i],
+  add (p, dot+1, start) to S[i+1].
+- Complete: for (p, dot, start) where dot == rhs.len() (complete), find all
+  items (q, dot2, start2) in S[start] where rhs2[dot2] == lhs_p, and add
+  (q, dot2+1, start2) to the current state set.
+
+The earley_per_step_mask replaces the exponential advance_eps_set for the
+per-step mask (the Qwen nested one_or_more loops, the frontier grows as
+num_states * num_stack_syms^k after k steps). The advance_eps_set is retained
+for the per-step frontier (the step_batch), but the Qwen test uses the Earley
+mask (the polynomial).
+
+CITATIONS:
+- Earley (1970) "Efficient Parsing of Context-Free Grammars" (the O(n^3) chart
+  parsing).
+- Leo (1991) "A Practical Algorithm for Primary Parsing" (the O(n) for LR(k)
+  grammars, the Aycock-Horspool optimization).
+- Sun et al. (arXiv:2506.01151) "Earley-Driven Dynamic Pruning for Efficient
+  Structured Decoding" (the ZapFormat, the dynamic pruning of dead Earley
+  states, the state cache).
+- pczarn/cfg (the Cfg::column, the DotInfo, the Earley column).
+
+## The token spanner (the T_inv, the GreatGramma, the approximation)
+
+The token spanner (the spanner.rs) maps (the lexer state, the terminal
+sequence) to the tokens that produce that sequence from that state (the
+GreatGramma T_inv, the arXiv:2502.05111 Def 3.4). The exact GreatGramma T_inv
+is:
+
+    T_inv(q, T1...TkT) = {t : q ->^{t:T1...Tk} q' in delta and T in Prod(q')}
+
+where Prod(q') is the set of terminals PRODUCIBLE from q' (the the reachability
+to accepting states, the Floyd 1962). This implementation uses the
+LexerDfa::accepting (the the terminals that COMPLETE at the state) as a proxy
+for the Prod (the the terminals producible from the state). The accepting is a
+SUBSET of the Prod (the the terminals that complete immediately, the no the ones
+that require further transitions). For lexers where the accepting set equals
+the Prod set (the the terminal completes at the state it is produced), this is
+exact. For lexers where the Prod extends beyond the accepting (the the terminal
+can be produced by further transitions), this is an under-approximation (the
+the T_inv misses some tokens). The LexerDfa trait would need a prod(q) method
+(the the reachability) for the exact GreatGramma T_inv.
+
+CITATIONS:
+- GreatGramma (Park, Zhou, D'Antoni, arXiv:2502.05111) Def 3.4 (the T_inv,
+  the Prod(q') reachability).
+- Floyd (1962) (the the reachability algorithm, the the(q') computation).
+- The LexerDfa::accepting (the the completed terminals, the no the producible).
+
+## The max_closure_width (the measurement, the no the static cap)
+
+The max_closure_width measures the maximum epsilon-closure width (the distinct
+(state, top) pairs reachable via epsilon moves from any (q, top)). This sizes
+the GPU frontier (the MAXF). The closure is over the (state, top) domain (the
+num_states * num_stack_syms pairs), so the width is bounded by the domain size
+(the no the overflow). The max_closure_width computes the EXACT maximum (the no
+an underestimate) via the local BFS mirror (the mask_at_cfg returns the allowed
+inputs, not the width). The proof_max_closure_width_is_exact test verifies:
+the width <= the domain size (the exclusive), the width == the independent BFS
+(the inclusive, the R3 different register).
+
+CITATIONS:
+- The epsilon closure over the (state, top) domain (the num_states * the
+  num_stack_syms, the finite domain, the Hopcroft-Ullman PDA configuration
+  semantics).
+- The GPU frontier sizing (the MAXF, the device.md three-way layout-identity).
+
+## The adversarial review (the proof status of every primitive)
+
+Each primitive is classified as PROVEN (the inclusive + exclusive, the
+independent oracle) or NOT-PROVEN (the gap). The MATHS grounding is from the
+external sources (the no the repo's own comments).
+
+PROVEN (the inclusive + exclusive, the independent oracle):
+- advance_eps (the single-config): the deterministic case, the cycle_dpda test,
+  the advance_eps_inclusion/exclusion_matches_reference_on_cycle.
+- mask_at_cfg (the epsilon-closure mask): the proof_mask_at_cfg_csr_equals_
+  linear, the GreatGramma Prop 3.5 stack invariance makes the top-dedup sound.
+- mask_at_cfg_settled (the settled mask): the proof_mask_at_cfg_settled_is_
+  precise, the inclusive + exclusive at every (q, top).
+- displacement (the CFGzip relation): the proof_displacement_equals_reference,
+  the monoid laws, the congruence.
+- passthrough_run / is_passthrough (the linear-run): the proof_passthrough_run_
+  exact, the proof_is_passthrough_sound, the independent linear chain-follow.
+- accepts_via_eps (the epsilon-closure acceptance): the proof_accepts_via_eps_
+  equals_reference, the independent linear-scan reference.
+- accepts_npda (the CYK): the differential tests, the a^n b^n, the balanced-
+  parens, the multi-NT, the independent cfg_accepts oracle.
+- accepts_dpda (the single-path): the a^n b^n, the scaling_small_to_large_
+  inputs, the Sénizergues 1997 result (the DPDA language equivalence is
+  decidable, the O(n^3) algorithm).
+
+NOT-PROVEN (the gaps):
+- accepts_dpda for GENERAL deterministic PDAs (the no just the a^n b^n). The
+  Sénizergues 1997 result proves the equivalence is decidable, but the repo's
+  accepts_dpda is the single-path simulation (the no the equivalence
+  algorithm). The single-path simulation is correct for the deterministic case
+  (the unique path), but it's not PROVEN against an independent oracle for
+  general DPDA.
+- summary.rs d_H for the UNBOUNDED stack (the no just the bounded H). The
+  current BoundedSummary::compute(machine, h) takes an explicit h (the caller-
+  supplied bound). The d_H is the (min,+) semiring fixed point (the Reps 2003,
+  the "min-plus semiring finds the shortest trace"). The repo's reverse BFS is
+  the correct mechanism, but it's bounded by the caller's h (the no the full
+  unbounded d_H).
+- max_closure_width (the measurement): this is a MEASUREMENT (the no a proof).
+  It measures the domain (the distinct (state, top) pairs reachable). The
+  correctness is on the mask_at_cfg closure (the proven). The max_closure_width
+  itself is not proven (it's a measurement, the no a theorem).
+
+MATHS GROUNDING (the external sources):
+- Sénizergues 1997 (the DPDA language equivalence is decidable, the O(n^3)
+  algorithm, the ICALP 1997).
+- Reps, Schwoon, Jha, Melski 2003 (the weighted pushdown systems, the (min,+)
+  dioid, the "min-plus semiring finds the shortest trace", the SAS 2003).
+- GreatGramma (Park, Zhou, D'Antoni, arXiv:2502.05111) Prop 3.5 (the stack
+  invariance, the acceptance invariant under the stack extension).
+- CFGzip (Sullivan & Koller, arXiv:2605.29986) Theorem 2 (the displacement
+  equivalence refines the syntactic congruence, the lossless compression).
+- Hopcroft, Motwani, Ullman (the CYK algorithm, the O(n^3) CFL word problem).
+- pczarn/cfg (the rhs_closure, the fixpoint over the productions, the
+  transitive closure of the RHS property).

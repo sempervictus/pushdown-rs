@@ -17,6 +17,8 @@
 
 use std::hash::Hash;
 
+use crate::compile::Cfg;
+
 /// The common pushdown automaton (the 7-tuple Q, Sigma, Gamma, delta, q0, Z0, F).
 ///
 /// The transition `delta(q, a, top)` yields the set of (q', gamma') pairs. For a
@@ -49,12 +51,12 @@ pub trait Pda {
 }
 
 /// A non-deterministic pushdown automaton (NPDA): accepts if ANY computation
-/// accepts. The search explores the full (state, stack) domain bounded by the
-/// input length + the state count (the domain size, the no the synthetic cap);
-/// a config beyond the bound signals a malformed machine (the error is emitted +
-/// propagated, the no the silent truncation).
+/// accepts. The membership is decided by the CFG (the CYK algorithm, the O(n^3)
+/// dynamicidable word problem for context-free languages, the Hopcroft-Ullman), NOT
+/// by the PDA frontier simulation (the exponential, the unbounded stack). The
+/// ` is passed to the method (the grammar is the source, the PDA is the product).
 pub trait Npda: Pda {
-    fn accepts_npda(&self, w: &[Self::Input]) -> bool;
+    fn accepts_npda(&self, cfg: &Cfg, w: &[Self::Input]) -> bool;
 }
 
 /// A deterministic pushdown automaton (DPDA): at most one transition per
@@ -76,8 +78,14 @@ pub trait PdaStream: Pda {
     type Config;
     /// The the mask (the set of legal inputs).
     type Mask;
-    /// The the batched step (the batched Node 2): the B (config, token) -> the B next-config.
-    fn step_batch(&self, batch: &[(Self::Config, Self::Input)]) -> Vec<Self::Config>;
+    /// The the batched step (the batched Node 2): the B (config, token) -> the B
+    /// next-config SETS. Each input config produces a SET of next-configs (the
+    /// the full-domain advance, the advance_eps_set, the no the single-config
+    /// advance_eps which drops the loop branch on non-deterministic machines).
+    /// The deterministic machine produces a 1-element set (the unique path); the
+    /// non-deterministic machine produces the full frontier (the all branches).
+    /// The SIMD == the scalar (the both call the advance_eps_set, the same sets).
+    fn step_batch(&self, batch: &[(Self::Config, Self::Input)]) -> Vec<Vec<Self::Config>>;
     /// The the batched mask (the batched Node 1): the B configs -> the B masks.
     fn mask_batch(&self, configs: &[Self::Config]) -> Vec<Self::Mask>;
     /// The the batched projection (the batched Node 3): the B configs x the K

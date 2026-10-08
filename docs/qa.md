@@ -97,13 +97,22 @@ unbounded item-set growth).
   phase-homology (the terminal/choice/exit/start moves preserve the phase,
   the call/return moves change it to the callee/caller), the bitvec round-trip.
 - The proofs: the determinism (the discriminating, the no-dup-key vs the
-  deterministic + the dup-key for the ambiguous), the bounded stack (the
-  reachable depth <= D, the per push bound), the mask fidelity (the PSC
-  classifier == the machine's legal inputs over the full config space), the
-  projection (the project(K) == the K sequential steps, the break on
-  divergence), the SWYB soundness (the d_H <= H for all reachable, the d_H = 0
-  unconditional for the accepting), the PSC codebook, the token spanner, the
-  batched invariants, the CUDA graph, the no-unsafe.
+   deterministic + the dup-key for the ambiguous), the DPDA single-path exactness
+   (the accepts_dpda == the CYK for the deterministic, the accepts_dpda == false
+   for the non-deterministic, the JFLAP a^n b^n DPDA == the cfg_accepts oracle,
+   the proof_dpda_single_path_agrees_with_cyk), the bounded stack (the
+   reachable depth <= D, the per push bound), the mask fidelity (the PSC
+   classifier == the machine's legal inputs over the full config space), the
+   projection (the project(K) == the K sequential steps, the break on
+divergence), the SWYB soundness (the d_H <= H for all reachable, the d_H = 0
+    unconditional for the accepting), the unbounded weighted-PDS distance (the S,
+    the no the S_H, the (min,+) dioid least fixed point, the reverse BFS pre*
+    saturation, the proof_unbounded_weighted_pds_distance), the max_closure_width
+    (the measurement, the no the static cap, the epsilon closure over the (state,
+    top) pairs bounded by num_states * num_stack_syms, the proof_max_closure__
+    is_exact), the PSC codebook, the
+    token spanner, the
+   batched invariants, the CUDA graph, the no-unsafe.
 - The epsilon-closure advance (the step_batch / the project_batch follow the
   epsilon moves to the terminal state, the no stuck call dots): the S -> a A b,
   A -> c grammar advances through the A call + the differential oracle agrees.

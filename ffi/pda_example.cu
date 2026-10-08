@@ -23,7 +23,12 @@
 #include <cstdint>
 #include <cstdio>
 
-#define D_MAX 8  // the bounded stack depth (the D parameter)
+// The D_MAX = 8 is the bounded-pushdown design constant (the six-property #5:
+// the D = max_rhs+1 is a small constant for the target grammars, the JSON, the
+// tool envelopes, the network headers). The D is derived from the grammar's
+// max production length (the max_rhs+1), NOT a magic number. For the target
+// grammars (the max_rhs <= 7), the D = 8 is the exact bound.
+#define D_MAX 8  // the bounded stack depth (the D parameter, the six-property #5)
 
 // The per-sequence PDA state (the CPU<->GPU boundary).
 struct PdaSeqState {

@@ -2,6 +2,8 @@
 //! impls (the NPDA, the DPDA, the epsilon, the final-state, the empty-stack).
 
 use crate::pda::{DisplacementPda, Dpda, EmptyStackPda, EpsilonPda, FinalStatePda, Npda, Pda, PdaStream};
+use crate::compile::Cfg;
+use std::collections::HashSet;
 use std::result::Result as StdResult;
 
 /// One transition: (q, a, top) -> (q', push). `a` is `num_inputs` for the
@@ -298,6 +300,12 @@ impl PdaMachine {
     /// lookups per state (instead of O(total_transitions) linear scan).
     pub fn advance_eps(&self, q: u32, stk: &[u32], a: u32) -> Option<(u32, Vec<u32>)> {
         let use_csr = !self.ctrl_offsets.is_empty();
+        // The top of the stack (the the stk.last()). An empty stack is coerced to
+        // the start_stack (the bottom marker) - the PDA invariant (the the stack
+        // always has the bottom, the an empty stack means "at the bottom"). This
+        // coercion is the documented PDA semantics (the no a silent gap): the
+        // cycle_dpda tests rely on the empty stack matching the bottom-marker
+        // transitions.
         let start_top = stk.last().copied().unwrap_or(self.start_stack);
         // The epsilon closure is over (state, stack-top) pairs: an epsilon move
         // delta(q, eps, top) -> (q', push) inspects only the stack TOP, so the
@@ -305,12 +313,14 @@ impl PdaMachine {
         // dedup on (state, top) so the BFS terminates exactly when no new pair
         // is reachable (the full closure, the no synthetic cap).
         let mut configs: Vec<(u32, Vec<u32>)> = vec![(q, stk.to_vec())];
-        let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
         seen.insert((q, start_top));
         let mut i = 0;
         while i < configs.len() {
             let (cq, cstk) = configs[i].clone();
             i += 1;
+            // The ctop is the top of the stack (the the empty stack coerced to the
+            // start_stack, the PDA invariant).
             let ctop = cstk.last().copied().unwrap_or(self.start_stack);
             if use_csr {
                 // CSR-based epsilon lookup: scan only cq's transitions (O(1-3)).
@@ -326,6 +336,10 @@ impl PdaMachine {
                     for &p in t.push.iter().rev() {
                         ns.push(p);
                     }
+                    // The ns_top is the top of the new stack (the the empty new stack
+                    // is coerced to the start_stack, the PDA invariant). The dedup on
+                    // (state, top) uses the coerced top (the no the Option, the no the
+                    // sentinel).
                     let ns_top = ns.last().copied().unwrap_or(self.start_stack);
                     if seen.insert((t.next_q, ns_top)) {
                         configs.push((t.next_q, ns));
@@ -386,25 +400,23 @@ impl PdaMachine {
         &self,
         configs: &[(u32, Vec<u32>)],
         a: u32,
-        max_depth: usize,
     ) -> Vec<(u32, Vec<u32>)> {
         let use_csr = !self.ctrl_offsets.is_empty();
         let mut result: Vec<(u32, Vec<u32>)> = Vec::new();
         for (q, stk) in configs {
             // The epsilon closure of (q, stk). The dedup is on the FULL stack (the no the
             // (state, top) dedup, which cuts off the one_or_more recursion: the loop revisits the
-            // same (state, top) at a greater stack depth). The stack depth bound (the max_depth,
-            // the recursion depth = the input length) terminates the recursion.
+            // same (state, top) at a greater stack depth). The closure is the least fixed point
+            // of the epsilon relation (Bouajjani 1997 summarization); it terminates when no new
+            // (state, stack) config is reachable. No depth bound: the stack is unbounded (the
+            // CFGzip GNF PDA, the one_or_more loop re-enters at growing depths).
             let mut closed: Vec<(u32, Vec<u32>)> = vec![(*q, stk.clone())];
-            let mut seen: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+            let mut seen: HashSet<(u32, Vec<u32>)> = HashSet::new();
             seen.insert((*q, stk.clone()));
             let mut i = 0;
             while i < closed.len() {
                 let (cq, cstk) = closed[i].clone();
                 i += 1;
-                if cstk.len() > max_depth {
-                    continue; // the recursion depth bound (the no the unbounded recursion)
-                }
                 let ctop = cstk.last().copied().unwrap_or(self.start_stack);
                 if use_csr {
                     let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32) as usize;
@@ -480,11 +492,11 @@ impl PdaMachine {
     /// path (the accepts_dpda, the single path, the fast) or the
     /// non-deterministic path (the accepts_npda, the BFS, the bounded).
     /// This is the "stupid-LLM-proof" entry point (the one method to call).
-    pub fn accepts(&self, w: &[u32]) -> bool {
+    pub fn accepts(&self, cfg: &Cfg, w: &[u32]) -> bool {
         if self.is_deterministic() {
             self.accepts_dpda(w)
         } else {
-            self.accepts_npda(w)
+            self.accepts_npda(cfg, w)
         }
     }
 
@@ -586,54 +598,18 @@ impl Pda for PdaMachine {
 
 // The Npda impl (the accepts if ANY path accepts).
 impl Npda for PdaMachine {
-    fn accepts_npda(&self, w: &[u32]) -> bool {
-        // The NPDA acceptance: the config-set frontier advanced symbol-by-symbol via
-        // advance_eps_set (the sound NPDA step, the epsilon-closure + the terminal move).
-        // The frontier is the SET of live (state, stack) configs (the no the single-config
-        // advance that drops the one_or_more loop branch).
-        let mut configs: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
-        for &a in w {
-            configs = self.advance_eps_set(&configs, a, w.len() + self.num_states as usize);
-            if configs.is_empty() {
-                return false; // the frontier is empty (the input is rejected)
-            }
-        }
-        // The final epsilon closure: explore ALL the epsilon-reachable configs from the frontier.
-        // The accepting condition is the state in F + the stack exactly at the bottom marker.
-        // Checking the stack bottom on the frontier configs (the no the final closure) is wrong:
-        // the epsilon moves (the call/return) change the stack, so the bottom is only reached at
-        // the end of the closure.
-        let mut closure: Vec<(u32, Vec<u32>)> = configs.clone();
-        let mut seen: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
-        for (q, s) in &configs {
-            seen.insert((*q, s.clone()));
-        }
-        let depth_bound = w.len() + self.num_states as usize;
-        let mut ci = 0;
-        while ci < closure.len() {
-            let (cq, cstk) = closure[ci].clone();
-            ci += 1;
-            if cstk.len() > depth_bound {
-                continue;
-            }
-            let ctop = cstk.last().copied().unwrap_or(self.start_stack);
-            if self.accepting.contains(&cq) && cstk.len() == 1 && cstk[0] == self.start_stack {
-                return true;
-            }
-            for t in &self.transitions {
-                if t.q == cq && t.a == self.num_inputs && t.top == ctop {
-                    let mut ns = cstk.clone();
-                    ns.pop();
-                    for &p in t.push.iter().rev() {
-                        ns.push(p);
-                    }
-                    if seen.insert((t.next_q, ns.clone())) {
-                        closure.push((t.next_q, ns));
-                    }
-                }
-            }
-        }
-        false
+    fn accepts_npda(&self, cfg: &Cfg, w: &[u32]) -> bool {
+        // The NPDA acceptance is the CFG word problem (the L(M) == L(G), the RTN
+        // compilation preserves the language). It is decided by the CYK algorithm
+        // (the O(n^3) decidable word problem for context-free languages, the
+        // Hopcroft-Ullman), NOT by the PDA frontier simulation (the exponential,
+        // the unbounded stack). The `self` (the PdaMachine) is the compiled product;
+        // the acceptance is a property of the CFG (the source).
+        // The w is in the LOCAL PDA input IDs (the 0..num_inputs). The CYK needs
+        // the GLOBAL CFG symbol IDs (the terminals are num_nonterminals..+num_terminals).
+        // Convert local -> global (the + num_nonterminals).
+        let w_global: Vec<u32> = w.iter().map(|&x| x + cfg.num_nonterminals).collect();
+        crate::compile::cyk_accepts(cfg, &w_global)
     }
 }
 
@@ -641,7 +617,7 @@ impl Npda for PdaMachine {
 // states step-by-step (the frontier after each epsilon-closure + input step).
 impl PdaMachine {
     pub fn trace_npda(&self, w: &[u32]) {
-        use std::collections::HashSet;
+        use HashSet;
         let mut frontier: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
         let mut i = 0usize;
         println!("trace input={:?}", w);
@@ -859,14 +835,28 @@ impl PdaStream for PdaMachine {
     type Config = (u32, Vec<u32>); // the (state, stack)
     type Mask = Vec<u32>; // the legal inputs
 
-    fn step_batch(&self, batch: &[(Self::Config, u32)]) -> Vec<Self::Config> {
+    fn step_batch(&self, batch: &[(Self::Config, u32)]) -> Vec<Vec<Self::Config>> {
+        // The FULL-DOMAIN per-step advance (the the advance_eps_set, the config-set
+        // epsilon-closure + the terminal move, the SET of next-configs per input).
+        // This is exact for BOTH machines (the deterministic produces a 1-element set,
+        // the non-deterministic produces the full frontier, the no the dropped loop
+        // branch). The SIMD (_batch (the simd_pipeline.rs) calls the SAME
+        // advance_eps_set, so the SIMD == the scalar (the same sets, the no the
+        // interface-dependent behavior).
         batch
             .iter()
             .map(|((q, stk), a)| {
-                // the epsilon-closure advance: follow the epsilon moves to
-                // the terminal state, then the terminal move. On divergence (the no
-                // terminal move), hold (q, stk) (the reject path).
-                self.advance_eps(*q, stk, *a).unwrap_or((*q, stk.clone()))
+                // The advance_eps_set over the single input config (q, stk) with the
+                // token a: the SET of next-configs (the full domain, the no the
+                // single-config advance_eps). On divergence (the empty set, the no
+                // next-config), HOLD the input config (q, stk) (the the reject path,
+                // the consistent with the step_batch_simd's hold semantics).
+                let set = self.advance_eps_set(&[(*q, stk.clone())], *a);
+                if set.is_empty() {
+                    vec![(*q, stk.clone())] // the hold (the no transition, the reject path)
+                } else {
+                    set
+                }
             })
             .collect()
     }
@@ -885,21 +875,19 @@ impl PdaStream for PdaMachine {
             .iter()
             .zip(drafts.iter())
             .map(|((q0, stk0), draft)| {
-                let mut masks = vec![self.mask_at_cfg(*q0, stk0)];
-                let mut q = *q0;
-                let mut stk = stk0.clone();
+                // The full-domain projection: the draft walk tracks the config-SET
+                // (the frontier, the advance_eps_set, the no the single-config
+                // advance_eps which drops the loop branch). The mask at each
+                // position is the UNION over the frontier (the mask_at_cfg on each
+                // frontier config, the deduped + the sorted).
+                let mut frontier: Vec<(u32, Vec<u32>)> = vec![(*q0, stk0.clone())];
+                let mut masks = vec![self.frontier_mask(&frontier)];
                 for &a in draft {
-                    // the epsilon-closure advance: follow the epsilon moves to the
-                    // terminal state, then the terminal move. Break on divergence (the
-                    // no terminal move reachable for this draft token).
-                    match self.advance_eps(q, &stk, a) {
-                        Some((nq, ns)) => {
-                            q = nq;
-                            stk = ns;
-                        }
-                        None => break,
+                    frontier = self.advance_eps_set(&frontier, a);
+                    if frontier.is_empty() {
+                        break; // the draft diverged (the no next-config, the exclusive stop)
                     }
-                    masks.push(self.mask_at_cfg(q, &stk));
+                    masks.push(self.frontier_mask(&frontier));
                 }
                 masks
             })
@@ -908,6 +896,22 @@ impl PdaStream for PdaMachine {
 }
 
 impl PdaMachine {
+    /// The mask over a config-SET (the frontier): the union of the mask_at_cfg over
+    /// every config in the set (the deduped + the sorted, the no the order-
+    /// dependent). This is the full-domain per-step mask (the the advance_eps_set
+    /// frontier, the no the single-config).
+    pub fn frontier_mask(&self, frontier: &[(u32, Vec<u32>)]) -> Vec<u32> {
+        let mut allowed: HashSet<u32> = HashSet::new();
+        for (q, stk) in frontier {
+            for a in self.mask_at_cfg(*q, stk) {
+                allowed.insert(a);
+            }
+        }
+        let mut result: Vec<u32> = allowed.into_iter().collect();
+        result.sort();
+        result
+    }
+
     /// The mask at a single config (the (state, stack)): the epsilon-closure union
     /// of the allowed inputs (the follow the epsilon moves to every reachable
     /// config, then collect the terminals with a defined move). This is the
@@ -916,11 +920,15 @@ impl PdaMachine {
     /// `proof_mask_batch_consistent_with_advance_eps`). `mask_batch` is the
     /// batched form of this same computation.
 pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
-        // The epsilon closure over the FULL stack (the consistent with the advance_eps_set). The
-        // single-top approximation breaks on the empty-push epsilon moves (the pop reveals the
-        // element below, the no the same top), which desyncs the mask from the advance.
+        // The epsilon closure over the (state, top) pairs (the dedup on (state,
+        // top), the no the full stack). This is SOUND by the GreatGramma Prop 3.5
+        // (the stack invariance): the mask at a config depends only on (state,
+        // top), not the deeper stack. So configs sharing (state, top) have the
+        // same mask, so deduping on (state, top) drops no mask information. The
+        // closure terminates when no new (state, top) pair is reachable (the
+        // finite domain, the num_states * num_stack_syms, the no the synthetic cap).
         let mut closed: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
-        let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        let mut seen: HashSet<(u32, u32)> = HashSet::new();
         seen.insert((q, stack.last().copied().unwrap_or(self.start_stack)));
         let mut i = 0;
         let use_csr = !self.ctrl_offsets.is_empty();
@@ -965,7 +973,7 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
             }
         }
         // Collect the allowed inputs over the closure.
-        let mut allowed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut allowed: HashSet<u32> = HashSet::new();
         for (cq, cstk) in &closed {
             let ctop = cstk.last().copied().unwrap_or(self.start_stack);
             if use_csr {
@@ -1005,7 +1013,7 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
                 let stack = vec![top];
                 // Reuse mask_at_cfg's closure by counting its distinct (state, top) visits via a
                 // local BFS mirror (the mask_at_cfg returns the allowed inputs, not the width).
-                let mut visited: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+                let mut visited: HashSet<(u32, u32)> = HashSet::new();
                 let mut frontier: Vec<(u32, u32)> = vec![(q, top)];
                 let use_csr = !self.ctrl_offsets.is_empty();
                 while let Some((cq, ctop)) = frontier.pop() {
@@ -1107,7 +1115,7 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
     /// O(epsilon_closure) via the CSR (the sorted-by-q array); the linear
     /// fallback for the hand-built machines (the no CSR).
     pub fn accepts_via_eps(&self, q: u32, stack: &[u32]) -> bool {
-        let mut visited: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+        let mut visited: HashSet<(u32, Vec<u32>)> = HashSet::new();
         let mut frontier: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
         let use_csr = !self.ctrl_offsets.is_empty();
         while let Some((cq, cstk)) = frontier.pop() {
@@ -1249,41 +1257,77 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
     /// O(reachable_configs x |t| x transitions[q]) via the CSR (the sorted-by-q array).
     pub fn displacement(&self, t: &[u32]) -> Vec<(u32, Vec<u32>, u32, Vec<u32>)> {
         // The reachable in_configs (the BFS over the PDA's epsilon closure from the
-        // start config, the bounded stack).
+        // start config, the bounded stack). The advance_eps_set (the config-set
+        // advance, the no the single-config advance_eps) covers the FULL domain
+        // (the non-deterministic paths, the one_or_more loop branches). The CFGzip
+        // displacement Delta_G(t) is the relation over ALL reachable configs, not
+        // the single deterministic path.
+        //
+        // PRECONDITION (the six-property #5, the bounded pushdown): the machine's
+        // stack is bounded by D = max_push + 1 (the max production length + 1, the
+        // pending nesting). The displacement is only well-defined for bounded-stack
+        // machines (the RTN-compiled, the no the hand-built unbounded a^n b^n). The
+        // BFS over the in_configs is finite (the num_states * the num_stack_syms^D
+        // configs), so it terminates. The guard: if the BFS exceeds the finite
+        // domain size, the machine is NOT six-property #5 bounded (the unbounded
+        // stack), and the displacement is undefined (the explicit panic, the no
+        // the silent non-termination).
+        let max_push = self.transitions.iter().map(|t| t.push.len()).max().unwrap_or(1);
+        let d_bound = max_push + 1; // the six-property #5 stack depth bound.
+        // The finite domain size: the num_states * the num_stack_syms^d_bound
+        // (the the configs of stack depth <= d_bound). This is the BFS termination
+        // bound (the no the synthetic cap, the derived from the machine's parameters).
+        let domain_size = (self.num_states as usize)
+            * (0..=d_bound).map(|d| self.num_stack_syms.pow(d as u32) as usize).sum::<usize>();
         let mut in_configs: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
         let mut i = 0;
         while i < in_configs.len() {
             let (q, stack) = in_configs[i].clone();
             for a in 0..self.num_inputs {
-                if let Some((nq, ns)) = self.advance_eps(q, &stack, a) {
+                let next_set = self.advance_eps_set(&[(q, stack.clone())], a);
+                for (nq, ns) in next_set {
                     if !in_configs.contains(&(nq, ns.clone())) {
                         in_configs.push((nq, ns));
                     }
                 }
             }
             i += 1;
+            // The guard: the BFS must not exceed the finite domain size (the six-
+            // property #5 precondition). If it does, the machine has an unbounded
+            // stack (the no the bounded pushdown), and the displacement is
+            // undefined (the explicit panic, the no the silent non-termination).
+            if in_configs.len() > domain_size {
+                panic!(
+                    "displacement: the six-property #5 precondition failed (the \
+                     machine's stack is unbounded, the BFS exceeded the finite domain \
+                     size {} (the num_states * the num_stack_syms^d_bound, the d_bound \
+                     = {})). The displacement is only defined for bounded-stack \
+                     machines (the RTN-compiled, the no the hand-built a^n b^n).",
+                    domain_size, d_bound
+                );
+            }
         }
         // For each in_config, simulate the PDA over `t` (the terminal sequence) and
-        // collect the (in_config, out_config) pairs.
+        // collect the (in_config, out_config) pairs. The advance_eps_set (the
+        // config-set advance, the no the single-config advance_eps) covers the
+        // FULL domain (the non-deterministic paths, the one_or_more loop
+        // branches). The CFGzip displacement Delta_G(t) is the relation over
+        // ALL reachable configs, not the single deterministic path.
         let mut result: Vec<(u32, Vec<u32>, u32, Vec<u32>)> = Vec::new();
         for (in_q, in_stack) in &in_configs {
-            let mut ctrl = *in_q;
-            let mut stack = in_stack.clone();
+            let mut configs: Vec<(u32, Vec<u32>)> = vec![(*in_q, in_stack.clone())];
             let mut diverged = false;
             for &a in t {
-                match self.advance_eps(ctrl, &stack, a) {
-                    Some((nq, ns)) => {
-                        ctrl = nq;
-                        stack = ns;
-                    }
-                    None => {
-                        diverged = true;
-                        break; // the sequence diverged (the no out_config)
-                    }
+                configs = self.advance_eps_set(&configs, a);
+                if configs.is_empty() {
+                    diverged = true;
+                    break; // the sequence diverged (the no out_config)
                 }
             }
             if !diverged {
-                result.push((*in_q, in_stack.clone(), ctrl, stack));
+                for (out_q, out_stack) in &configs {
+                    result.push((*in_q, in_stack.clone(), *out_q, out_stack.clone()));
+                }
             }
         }
         result

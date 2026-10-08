@@ -79,7 +79,7 @@ fn main() {
         let deku_ok = FixedTlv::from_bytes((bytes.as_slice(), 0)).is_ok();
         // the PDA (the our code) - the input is the local terminal IDs
         let pda_input: Vec<u32> = vec![0, 1, 2]; // the tag, the length, the value_byte
-        let pda_ok = pda.accepts_npda(&pda_input);
+        let pda_ok = pda.accepts_npda(&named.cfg, &pda_input);
         println!(
             "  {:?} -> deku={} pda={} expected={} {}",
             bytes,

@@ -6,6 +6,21 @@
 //!
 //! The T_inv is the precomputed source data for the GPU/SIMD construction: the
 //! mask at a PDA config is the T_inv over the accepted terminal sequences.
+//!
+//! APPROXIMATION (the the no the exact GreatGramma T_inv): the GreatGramma
+//! Def 3.4 is T_inv(q, T1...TkT) = {t : q ->^{t:T1...Tk} q' and T in Prod(q')},
+//! where Prod(q') is the set of terminals PRODUCIBLE from q' (the the reachability
+//! to accepting states, the Floyd 1962). This implementation uses the
+//! LexerDfa::accepting (the the terminals that COMPLETE at the state) as a
+//! proxy for the Prod (the the terminals producible from the state). The
+//! accepting is a SUBSET of the Prod (the the terminals that complete immediately,
+//! the no the ones that require further transitions). For lexers where the
+//! accepting set equals the Prod set (the the terminal completes at the state it
+//! is produced), this is exact. For lexers where the Prod extends beyond the
+//! accepting (the the terminal can be produced by further transitions), this is
+//! an under-approximation (the the T_inv misses some tokens). The LexerDfa trait
+//! would need a prod(q) method (the the producability) for the exact GreatGramma
+//! T_inv.
 
 use std::collections::HashMap;
 

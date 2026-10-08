@@ -5,7 +5,6 @@
 mod simd_accuracy {
     use pushdown_rs::simd::{compute_bias, MaskBroadcastOp, MaskOp, StepBatchOp};
     use pushdown_rs::machine::PdaMachine;
-    use pushdown_rs::pda::{PdaStream, Dpda};
     use rten_simd::SimdOp;
 
     /// PROOF: MaskBroadcastOp::dispatch() == MaskBroadcastOp::scalar()
@@ -227,7 +226,7 @@ mod simd_accuracy {
         // Run the scalar step_batch on a batch of configs.
         let batch_size = 8;
         let configs: Vec<(u32, Vec<u32>)> = (0..batch_size)
-            .map(|i| (pda.start_state, vec![pda.start_stack]))
+            .map(|_i| (pda.start_state, vec![pda.start_stack]))
             .collect();
         let drafts: Vec<Vec<u32>> = (0..batch_size)
             .map(|i| vec![i as u32 % pda.num_inputs])
@@ -255,7 +254,7 @@ mod simd_accuracy {
             // (the broadcast token case).
             assert_eq!(
                 simd_result[0] as u32,
-                scalar_result[0].0,
+                scalar_result[0][0].0,
                 "the SIMD step must match the scalar step for the large deterministic PDA"
             );
         } else {
@@ -333,7 +332,7 @@ mod simd_accuracy {
         // The B configs (the B >= 16, the 512-bit u32 lanes loaded).
         let b = 32;
         let configs: Vec<(u32, Vec<u32>)> = (0..b)
-            .map(|i| (pda.start_state, vec![pda.start_stack]))
+            .map(|_i| (pda.start_state, vec![pda.start_stack]))
             .collect();
         // The B masks (the allowed inputs at the B configs).
         let masks = pipeline.mask_batch(&configs);

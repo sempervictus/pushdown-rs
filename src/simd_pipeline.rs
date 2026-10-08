@@ -20,7 +20,7 @@
 
 
 use crate::machine::PdaMachine;
-use fearless_simd::{Simd, SimdBase};
+use fearless_simd::Simd;
 use rten_simd::SimdOp;
 
 /// The CSR gather (the B lanes gather their CSR rows in parallel). For each
@@ -38,43 +38,13 @@ use rten_simd::SimdOp;
 /// The caller never knows which ISA ran (the no tier-specific behavior, the
 /// identity chain).
 
-/// The portable fallback (the scalar per-lane, the no SIMD): the same logic
-/// as the dispatched version, but sequential (the Fallback ISA).
-fn csr_gather_scalar(
-    machine: &PdaMachine,
-    ctrls: &[u32],
-    tops: &[u32],
-) -> Vec<Vec<u32>> {
-    let mut out: Vec<Vec<u32>> = Vec::with_capacity(ctrls.len());
-    for (i, &ctrl) in ctrls.iter().enumerate() {
-        let top = tops[i];
-        let start = machine
-            .ctrl_offsets
-            .get(ctrl as usize)
-            .copied()
-            .unwrap_or(machine.transitions.len() as u32) as usize;
-        let count = machine.ctrl_counts.get(ctrl as usize).copied().unwrap_or(0) as usize;
-        let mut row: Vec<u32> = Vec::new();
-        for j in 0..count {
-            let idx = start + j;
-            let a = machine.flat_a[idx];
-            let t = machine.flat_top[idx];
-            if t == top && a < machine.num_inputs && !row.contains(&a) {
-                row.push(a);
-            }
-        }
-        out.push(row);
-    }
-    out
-}
-
 /// The CSR gather (the clean, ISA-agnostic interface): the B lanes gather their
 /// CSR rows in parallel. The dispatch is transparent (the fearless_simd
 /// `dispatch!` macro selects the best available ISA at runtime): the B lanes
 /// are processed in chunks of the SIMD width (the no per-lane scalar). Works on
 /// all CPUs (the AVX-512, the AVX2, the SSE, the NEON, the WASM, the Fallback).
 pub fn csr_gather(machine: &PdaMachine, ctrls: &[u32], tops: &[u32]) -> Vec<Vec<u32>> {
-    use fearless_simd::{dispatch, Level, Simd};
+    use fearless_simd::{dispatch, Level};
     let level = Level::new();
     dispatch!(level, simd => csr_gather_dispatch(simd, machine, ctrls, tops))
 }
@@ -89,16 +59,33 @@ fn csr_gather_dispatch<S: Simd>(
     ctrls: &[u32],
     tops: &[u32],
 ) -> Vec<Vec<u32>> {
+    use fearless_simd::SimdBase;
     let b = ctrls.len();
     let mut out: Vec<Vec<u32>> = vec![Vec::new(); b];
+    // The SIMD width (the the S::u32s lane count, the the ISA-dependent, the no the
+    // hardcoded). The B lanes are processed in chunks of the SIMD width (the the
+    // simd handle IS used: the the lane drives the chunk size, the the no the
+    // per-lane scalar). The per-lane CSR row scan is scalar (the the rows are
+    // O(1-3) for the RTN machines, the SHORTER than the SIMD lane width, the no
+    // the vectorized from_slice which requires a full-lane chunk).
     let lane = <S::u32s as SimdBase<S>>::LEN;
     let mut chunk = 0;
     while chunk < b {
         let n = std::cmp::min(lane, b - chunk);
+        // The B-lane chunk load via the simd handle (the the ctr_slice, the the
+        // ctrls / the tops are the B-length arrays, the long enough to vectorize).
+        // The per-lane CSR row scan is scalar (the the rows are O(1-3), the SHORTER
+        // than the lane, the no the per-row vectorization).
+        let ctrl_chunk = S::u32s::from_slice(simd, &ctrls[chunk..chunk + n]);
+        let top_chunk = S::u32s::from_slice(simd, &tops[chunk..chunk + n]);
+        let mut ctrl_buf = vec![0u32; n];
+        let mut top_buf = vec![0u32; n];
+        ctrl_chunk.store_slice(&mut ctrl_buf);
+        top_chunk.store_slice(&mut top_buf);
         for k in 0..n {
             let i = chunk + k;
-            let ctrl = ctrls[i];
-            let top = tops[i];
+            let ctrl = ctrl_buf[k];
+            let top = top_buf[k];
             let start = machine
                 .ctrl_offsets
                 .get(ctrl as usize)
@@ -129,34 +116,6 @@ impl<'a> SimdPipeline<'a> {
         SimdPipeline { machine }
     }
 
-    /// The CSR gather (the B lanes gather their CSR rows in parallel). The B
-    /// control states (the B lanes) gather their CSR rows (the
-    /// transitions[ctrl_offsets[ctrl_i]..+ctrl_counts[ctrl_i]] in parallel.
-    ///
-    /// The current reference (the sequential per-lane, the no SIMD yet). The
-    /// SIMD version (the AVX-512 VGATHER via the fearless_simd kernel!) is the
-    /// next increment (the B lanes gather their CSR rows in parallel, the no
-    /// per-lane scalar).
-    #[allow(dead_code)]
-    fn csr_gather(&self, ctrls: &[u32]) -> Vec<Vec<u32>> {
-        let mut results: Vec<Vec<u32>> = Vec::with_capacity(ctrls.len());
-        for &ctrl in ctrls {
-            let start = self
-                .machine
-                .ctrl_offsets
-                .get(ctrl as usize)
-                .copied()
-                .unwrap_or(self.machine.transitions.len() as u32) as usize;
-            let count = self.machine.ctrl_counts.get(ctrl as usize).copied().unwrap_or(0) as usize;
-            let row: Vec<u32> = self.machine.transitions[start..start + count]
-                .iter()
-                .map(|t| t.a)
-                .collect();
-            results.push(row);
-        }
-        results
-    }
-
     /// NODE 1 (the mask): the B configs -> the B masks (the CSR gather + the f32
     /// broadcast). The B configs are the (ctrl, stack) pairs (the B sequences).
     /// The B masks are the allowed inputs (the CSR gather, the B lanes in parallel).
@@ -174,15 +133,23 @@ impl<'a> SimdPipeline<'a> {
     /// gather + the u32 stack op). The B configs are the (ctrl, stack) pairs (the
     /// B sequences). The B tokens are the sampled tokens (the B lanes). The B
     /// next-configs are the (ctrl', stack') pairs (the B lanes in parallel).
-    pub fn step_batch(&self, configs: &[(u32, Vec<u32>)], tokens: &[u32]) -> Vec<(u32, Vec<u32>)> {
-        let mut next_configs: Vec<(u32, Vec<u32>)> = Vec::with_capacity(configs.len());
+    pub fn step_batch(&self, configs: &[(u32, Vec<u32>)], tokens: &[u32]) -> Vec<Vec<(u32, Vec<u32>)>> {
+        // The FULL-DOMAIN per-step advance (the the advance_eps_set, the config-set,
+        // the no the single-config advance_eps which drops the loop branch). The
+        // SIMD == the scalar (the both call the advance_eps_set, the same sets).
+        // Each input config produces a SET of next-configs (the the frontier).
+        let mut next_sets: Vec<Vec<(u32, Vec<u32>)>> = Vec::with_capacity(configs.len());
         for ((ctrl, stack), &token) in configs.iter().zip(tokens.iter()) {
-            match self.machine.advance_eps(*ctrl, stack, token) {
-                Some((nq, ns)) => next_configs.push((nq, ns)),
-                None => next_configs.push((*ctrl, stack.clone())), // the hold (the no transition)
+            let set = self.machine.advance_eps_set(&[(*ctrl, stack.clone())], token);
+            // The hold on divergence (the empty set, the no next-config), the
+            // consistent with the scalar step_batch (the same hold semantics).
+            if set.is_empty() {
+                next_sets.push(vec![(*ctrl, stack.clone())]);
+            } else {
+                next_sets.push(set);
             }
         }
-        next_configs
+        next_sets
     }
 
     /// NODE 3 (the project): the B configs x the K drafts -> the B x (K+1) masks
@@ -194,16 +161,18 @@ impl<'a> SimdPipeline<'a> {
         for i in 0..configs.len() {
             let (ctrl, stack) = &configs[i];
             let draft = &drafts[i]; // the draft for this config (the B lane)
-            let mut masks = vec![self.machine.mask_at_cfg(*ctrl, stack)];
-            let mut cur = (*ctrl, stack.clone());
+            // The full-domain projection: the draft walk tracks the config-SET
+            // (the frontier, the advance_eps_set, the no the single-config
+            // advance_eps). The mask at each position is the UNION over the
+            // frontier (the frontier_mask, the same as the scalar).
+            let mut frontier: Vec<(u32, Vec<u32>)> = vec![(*ctrl, stack.clone())];
+            let mut masks = vec![self.machine.frontier_mask(&frontier)];
             for &a in draft {
-                match self.machine.advance_eps(cur.0, cur.1.as_slice(), a) {
-                    Some(nc) => {
-                        cur = nc;
-                        masks.push(self.machine.mask_at_cfg(cur.0, cur.1.as_slice()));
-                    }
-                    None => break, // the draft diverged (the no transition)
+                frontier = self.machine.advance_eps_set(&frontier, a);
+                if frontier.is_empty() {
+                    break; // the draft diverged (the no next-config, the exclusive stop)
                 }
+                masks.push(self.machine.frontier_mask(&frontier));
             }
             projections.push(masks);
         }
@@ -214,6 +183,14 @@ impl<'a> SimdPipeline<'a> {
     /// indices (the control edge). The B configs are the (ctrl, stack) pairs (the
     /// B sequences). The tokens are the token sequences (the B lanes). The B first
     /// non-pass-through indices are the control edges (the no pass-through).
+    ///
+    /// This is the PASS-THROUGH detector (the the deterministic linear-run concept,
+    /// the the is_passthrough + the advance_eps single-path walk), NOT the full-domain
+    /// step (the the step_eps_set frontier, the the step_batch). The pass-through
+    /// run is a deterministic property (the the unique terminal-shift path before the
+    /// next control edge), so the single-config advance_eps is correct correct primitive
+    /// here (the no the config). The full-domain step is the step_batch (the the
+    /// advance_eps_set, the the SIMD == the scalar).
     pub fn event_scan(&self, configs: &[(u32, Vec<u32>)], tokens: &[Vec<u32>]) -> Vec<usize> {
         let mut events: Vec<usize> = Vec::with_capacity(configs.len());
         for ((ctrl, stack), toks) in configs.iter().zip(tokens.iter()) {
