@@ -49,10 +49,12 @@ pub trait Pda {
 }
 
 /// A non-deterministic pushdown automaton (NPDA): accepts if ANY computation
-/// accepts. `max_stack` bounds the pushdown depth; `max_configs` bounds the
-/// search (the production time safeguard - the BFS frontier cap).
+/// accepts. The search explores the full (state, stack) domain bounded by the
+/// input length + the state count (the domain size, the no the synthetic cap);
+/// a config beyond the bound signals a malformed machine (the error is emitted +
+/// propagated, the no the silent truncation).
 pub trait Npda: Pda {
-    fn accepts_npda(&self, w: &[Self::Input], max_stack: usize, max_configs: usize) -> bool;
+    fn accepts_npda(&self, w: &[Self::Input]) -> bool;
 }
 
 /// A deterministic pushdown automaton (DPDA): at most one transition per

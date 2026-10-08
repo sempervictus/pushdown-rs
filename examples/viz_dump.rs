@@ -80,7 +80,7 @@ fn main() {
     );
     // A trace (the decompose the closure states). Local terminals: a=0, b=1.
     println!("  trace [0, 1] (the \"ab\", the a^n b^n with n=1):");
-    m_anb.trace_npda(&[0, 1], 64);
+    m_anb.trace_npda(&[0, 1]);
     let svg = dir.join("anbn.svg");
     let dot = dir.join("anbn.dot");
     viz::write_svg(&m_anb, Some(&anb_states), None, &svg).expect("write a^n b^n svg");
@@ -156,7 +156,7 @@ fn main() {
             "  {:?} -> accepts={} (npda={})",
             w,
             m_dfa.accepts_dpda(w),
-            m_dfa.accepts_npda(w, 8, 1000)
+            m_dfa.accepts_npda(w)
         );
     }
 

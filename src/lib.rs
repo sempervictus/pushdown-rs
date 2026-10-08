@@ -41,8 +41,8 @@
 //!
 //! The [`machine`] module defines the concrete [`PdaMachine`] (the 7-tuple with
 //! u32 IDs) + the variant impls (the NPDA simulation, the DPDA simulation, the
-//! determinism check). The simulation is bounded by the max_stack (the pushdown
-//! depth) + the max_configs (the time safeguard) - the production safeguards.
+//! determinism check). The simulation is bounded by the domain size (the input
+//! length + the state count, the no the synthetic max_stack / max_configs caps).
 //!
 //! ## The bitvec
 //!

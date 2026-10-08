@@ -197,7 +197,7 @@ fn exhaustive_differential(m: &PdaMachine, g: &Cfg, max_len: usize) {
                 })
                 .collect();
             let local: Vec<u32> = seq.iter().map(|&x| x - num_nt).collect();
-            let pda_says = m.accepts_npda(&local, 64, 1_000_000);
+            let pda_says = m.accepts_npda(&local);
             let oracle_says = cfg_accepts(g, &seq);
             assert_eq!(
                 pda_says, oracle_says,
@@ -240,7 +240,7 @@ fn the_sql_language_matches_the_recursive_descent_oracle() {
         vec![], // the the just-out: the empty
     ];
     for w in &cases {
-        let pda_says = m.accepts_npda(w, 64, 100_000);
+        let pda_says = m.accepts_npda(w);
         let oracle_says = sql_oracle(w);
         assert_eq!(
             pda_says, oracle_says,
@@ -264,7 +264,7 @@ fn the_ebpf_language_matches_the_walker_oracle() {
         vec![], // the the just-out: the empty
     ];
     for w in &cases {
-        let pda_says = m.accepts_npda(w, 64, 100_000);
+        let pda_says = m.accepts_npda(w);
         let oracle_says = ebpf_walker(w);
         assert_eq!(
             pda_says, oracle_says,

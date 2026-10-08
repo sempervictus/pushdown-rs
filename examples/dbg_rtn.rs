@@ -37,10 +37,10 @@ fn main() {
     for t in &m.transitions {
         println!("  ({}, in {}, top {}) -> ({}, push {:?})", t.q, t.a, t.top, t.next_q, t.push);
     }
-    println!("accepts [1,2] (ab) = {}", m.accepts_npda(&[1, 2], 64, 100_000));
-    println!("accepts [1,1,2,2] (aabb) = {}", m.accepts_npda(&[1, 1, 2, 2], 64, 100_000));
+    println!("accepts [1,2] (ab) = {}", m.accepts_npda(&[1, 2]));
+    println!("accepts [1,1,2,2] (aabb) = {}", m.accepts_npda(&[1, 1, 2, 2]));
     println!("\n=== TRACE [1,2] (the decompose the closure states) ===");
-    m.trace_npda(&[1, 2], 64);
+    m.trace_npda(&[1, 2]);
     dump_viz(&m, &rtn_state_names(&g_named), "anbn");
 
     // the [a-z]+ regex case: the empty-input mismatch exposure
@@ -60,7 +60,7 @@ fn main() {
     let rg_named = NamedCfg::new(rg, vec!["a", "b"].iter().map(|s| s.to_string()).collect());
     let rm = pushdown_rs::compile(&rg_named).expect("compile");
     println!("  accepts_dpda([])  = {}", rm.accepts_dpda(&[]));
-    println!("  accepts_npda([])  = {}", rm.accepts_npda(&[], 64, 100_000));
+    println!("  accepts_npda([])  = {}", rm.accepts_npda(&[]));
     println!("  oracle cfg_accepts([]) = {}", pushdown_rs::oracle::cfg_accepts(&rg_named.cfg, &[]));
     println!("  accepts_dpda([1]) = {}", rm.accepts_dpda(&[1]));
     println!("  oracle cfg_accepts([1]) = {}", pushdown_rs::oracle::cfg_accepts(&rg_named.cfg, &[1]));
@@ -83,6 +83,6 @@ fn main() {
     }
     println!("  accepts([]) = {}", rm2.accepts(&[]));
     println!("  accepts([2]) = {}", rm2.accepts(&[2]));
-    rm2.trace_npda(&[], 64);
+    rm2.trace_npda(&[]);
     dump_viz(&rm2, &rtn_state_names(&rg2_named), "regex_llguidance");
 }

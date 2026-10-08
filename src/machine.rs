@@ -4,11 +4,6 @@
 use crate::pda::{DisplacementPda, Dpda, EmptyStackPda, EpsilonPda, FinalStatePda, Npda, Pda, PdaStream};
 use std::result::Result as StdResult;
 
-/// The default bounds for the NPDA search (the accepts_npda's safeguards).
-/// The max_stack bounds the pushdown depth; the max_configs bounds the search.
-pub const DEFAULT_MAX_STACK: usize = 64;
-pub const DEFAULT_MAX_CONFIGS: usize = 1_000_000;
-
 /// One transition: (q, a, top) -> (q', push). `a` is `num_inputs` for the
 /// epsilon-input. `push` is the stack string that replaces `top` (empty = pop).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,9 +290,9 @@ impl PdaMachine {
     /// `None` if no terminal move is reachable (the divergence / the reject path).
     ///
     /// This matches the accepts_npda BFS semantics (the epsilon moves are resolved
-    /// before the terminal move). The RTN epsilon graph is local, so the closure is
-    /// bounded; the MAX_EPS_CLOSURE cap is the safety safeguard against a
-    /// pathological (the non-RTN) machine.
+    /// before the terminal move). The closure is over the (state, stack-top) pairs,
+    /// a finite domain of size num_states * num_stack_syms, so the BFS terminates
+    /// when no new pair is reachable (the no the synthetic cap).
     ///
     /// Uses the CSR index (ctrl_offsets + ctrl_counts) for O(1-3) transition
     /// lookups per state (instead of O(total_transitions) linear scan).
@@ -391,15 +386,15 @@ impl PdaMachine {
         &self,
         configs: &[(u32, Vec<u32>)],
         a: u32,
-        max_stack_depth: usize,
+        max_depth: usize,
     ) -> Vec<(u32, Vec<u32>)> {
         let use_csr = !self.ctrl_offsets.is_empty();
         let mut result: Vec<(u32, Vec<u32>)> = Vec::new();
         for (q, stk) in configs {
             // The epsilon closure of (q, stk). The dedup is on the FULL stack (the no the
             // (state, top) dedup, which cuts off the one_or_more recursion: the loop revisits the
-            // same (state, top) at a greater stack depth). The stack depth bound terminates the
-            // recursion (the bounded pushdown, the six-property).
+            // same (state, top) at a greater stack depth). The stack depth bound (the max_depth,
+            // the recursion depth = the input length) terminates the recursion.
             let mut closed: Vec<(u32, Vec<u32>)> = vec![(*q, stk.clone())];
             let mut seen: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
             seen.insert((*q, stk.clone()));
@@ -407,8 +402,8 @@ impl PdaMachine {
             while i < closed.len() {
                 let (cq, cstk) = closed[i].clone();
                 i += 1;
-                if cstk.len() > max_stack_depth {
-                    continue; // the stack depth bound (the no the unbounded recursion)
+                if cstk.len() > max_depth {
+                    continue; // the recursion depth bound (the no the unbounded recursion)
                 }
                 let ctop = cstk.last().copied().unwrap_or(self.start_stack);
                 if use_csr {
@@ -489,18 +484,7 @@ impl PdaMachine {
         if self.is_deterministic() {
             self.accepts_dpda(w)
         } else {
-            self.accepts_npda(w, DEFAULT_MAX_STACK, DEFAULT_MAX_CONFIGS)
-        }
-    }
-
-    /// The universal accepts with caller-controlled bounds (the max_stack +
-    /// the max_configs). The `accepts` uses the defaults; this lets the caller
-    /// tune the search bounds for large/deep grammars.
-    pub fn accepts_sized(&self, w: &[u32], max_stack: usize, max_configs: usize) -> bool {
-        if self.is_deterministic() {
-            self.accepts_dpda(w)
-        } else {
-            self.accepts_npda(w, max_stack, max_configs)
+            self.accepts_npda(w)
         }
     }
 
@@ -602,88 +586,61 @@ impl Pda for PdaMachine {
 
 // The Npda impl (the accepts if ANY path accepts).
 impl Npda for PdaMachine {
-    fn accepts_npda(&self, w: &[u32], max_stack: usize, max_configs: usize) -> bool {
-        // the BFS over the (q, stack) configurations, bounded by max_stack +
-        // max_configs (the production safeguards). The seen set dedups the
-        // frontier (prevents the duplicate blowup).
-        use std::collections::HashSet;
-        let mut frontier: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
-        let mut explored = 0usize;
-        let mut i = 0usize;
-        loop {
-            // the epsilon-closure (the dedup is per-step, not global)
-            let mut seen: HashSet<(u32, Vec<u32>)> = frontier.iter().cloned().collect();
-            let mut changed = true;
-            while changed {
-                changed = false;
-                let mut next = Vec::new();
-                for &(q, ref stack) in &frontier {
-                    let Some(top) = stack.last().copied() else {
-                        continue; // the empty stack (the no top) - skip
-                    };
-                    for (q2, push) in self.transition(q, None, top) {
-                        let mut s2 = stack.clone();
-                        s2.pop();
-                        for &p in push.iter().rev() {
-                            s2.push(p);
-                        }
-                        if s2.len() <= max_stack && seen.insert((q2, s2.clone())) {
-                            next.push((q2, s2));
-                            changed = true;
-                        }
-                    }
-                }
-                if !next.is_empty() {
-                    let added = next.len();
-                    frontier.extend(next);
-                    explored += added;
-                    if explored > max_configs {
-                        return false; // the time bound (the production safeguard)
-                    }
-                }
-            }
-            if i >= w.len() {
-                // accept only at the top level: the stack is exactly the bottom
-                // marker (the inner reductions leave a return address on the stack)
-                return frontier.iter().any(|(q, s)| {
-                    self.accepting.contains(q) && s.len() == 1 && s[0] == self.start_stack
-                });
-            }
-            let a = w[i];
-            i += 1;
-            let mut seen: HashSet<(u32, Vec<u32>)> = HashSet::new();
-            let mut next = Vec::new();
-            for &(q, ref stack) in &frontier {
-                let Some(top) = stack.last().copied() else {
-                    continue; // the empty stack (the no top) - skip
-                };
-                for (q2, push) in self.transition(q, Some(a), top) {
-                    let mut s2 = stack.clone();
-                    s2.pop();
-                    for &p in push.iter().rev() {
-                        s2.push(p);
-                    }
-                    if s2.len() <= max_stack && seen.insert((q2, s2.clone())) {
-                        next.push((q2, s2));
-                    }
-                }
-            }
-            frontier = next;
-            explored += frontier.len();
-            if explored > max_configs {
-                return false; // the time bound (the production safeguard)
-            }
-            if frontier.is_empty() {
-                return false;
+    fn accepts_npda(&self, w: &[u32]) -> bool {
+        // The NPDA acceptance: the config-set frontier advanced symbol-by-symbol via
+        // advance_eps_set (the sound NPDA step, the epsilon-closure + the terminal move).
+        // The frontier is the SET of live (state, stack) configs (the no the single-config
+        // advance that drops the one_or_more loop branch).
+        let mut configs: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
+        for &a in w {
+            configs = self.advance_eps_set(&configs, a, w.len() + self.num_states as usize);
+            if configs.is_empty() {
+                return false; // the frontier is empty (the input is rejected)
             }
         }
+        // The final epsilon closure: explore ALL the epsilon-reachable configs from the frontier.
+        // The accepting condition is the state in F + the stack exactly at the bottom marker.
+        // Checking the stack bottom on the frontier configs (the no the final closure) is wrong:
+        // the epsilon moves (the call/return) change the stack, so the bottom is only reached at
+        // the end of the closure.
+        let mut closure: Vec<(u32, Vec<u32>)> = configs.clone();
+        let mut seen: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+        for (q, s) in &configs {
+            seen.insert((*q, s.clone()));
+        }
+        let depth_bound = w.len() + self.num_states as usize;
+        let mut ci = 0;
+        while ci < closure.len() {
+            let (cq, cstk) = closure[ci].clone();
+            ci += 1;
+            if cstk.len() > depth_bound {
+                continue;
+            }
+            let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+            if self.accepting.contains(&cq) && cstk.len() == 1 && cstk[0] == self.start_stack {
+                return true;
+            }
+            for t in &self.transitions {
+                if t.q == cq && t.a == self.num_inputs && t.top == ctop {
+                    let mut ns = cstk.clone();
+                    ns.pop();
+                    for &p in t.push.iter().rev() {
+                        ns.push(p);
+                    }
+                    if seen.insert((t.next_q, ns.clone())) {
+                        closure.push((t.next_q, ns));
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
 // TODO: remove_for_production - the debug trace that decomposes the closure
 // states step-by-step (the frontier after each epsilon-closure + input step).
 impl PdaMachine {
-    pub fn trace_npda(&self, w: &[u32], max_stack: usize) {
+    pub fn trace_npda(&self, w: &[u32]) {
         use std::collections::HashSet;
         let mut frontier: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
         let mut i = 0usize;
@@ -706,7 +663,7 @@ impl PdaMachine {
                         for &p in push.iter().rev() {
                             s2.push(p);
                         }
-                        if s2.len() <= max_stack && seen.insert((q2, s2.clone())) {
+                        if seen.insert((q2, s2.clone())) {
                             next.push((q2, s2));
                             changed = true;
                         }
@@ -739,7 +696,7 @@ impl PdaMachine {
                     for &p in push.iter().rev() {
                         s2.push(p);
                     }
-                    if s2.len() <= max_stack && seen.insert((q2, s2.clone())) {
+                    if seen.insert((q2, s2.clone())) {
                         next.push((q2, s2));
                     }
                 }

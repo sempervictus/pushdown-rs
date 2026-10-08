@@ -196,7 +196,7 @@ fn main() {
         let nom_ok = ber_tlv_many(bytes).is_ok();
         // the PDA input is the local terminal IDs (the 0=tag, the 1=len, the 2=value)
         let pda_input: Vec<u32> = vec![0, 1, 2];
-        let pda_ok = ber_pda.accepts_npda(&pda_input, 64, 100_000);
+        let pda_ok = ber_pda.accepts_npda(&pda_input);
         println!(
             "  {:?} -> nom={} pda={} expected={} {}",
             bytes,

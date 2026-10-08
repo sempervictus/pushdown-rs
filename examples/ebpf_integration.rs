@@ -113,7 +113,7 @@ fn main() {
     println!("\n=== The differential: the PDA == the call-depth walker ===");
     let mut agree = 0;
     for w in &corpus {
-        let pda_says = m.accepts_npda(w, 64, 100_000);
+        let pda_says = m.accepts_npda(w);
         let oracle_says = ebpf_walker(w);
         let ok = pda_says == oracle_says;
         if ok {

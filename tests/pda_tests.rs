@@ -140,11 +140,11 @@ fn rtn_compilation_state_count_and_language() {
     let m2 = pushdown_rs::compile(&g2).expect("compile");
     // the c input ID for the c (the global 3) = 3 - 1 = 2
     assert!(
-        m2.accepts_npda(&[2], 32, 100_000),
+        m2.accepts_npda(&[2]),
         "the NPDA accepts c (the S -> c)"
     );
     assert!(
-        !m2.accepts_npda(&[0], 32, 100_000),
+        !m2.accepts_npda(&[0]),
         "the NPDA rejects a (the no S -> a)"
     );
 }
@@ -440,15 +440,15 @@ fn rtn_ambiguous_grammar_is_npda() {
     const A: u32 = 0; // the a (the local input ID)
     const B: u32 = 1; // the b (the local input ID)
     assert!(
-        m.accepts_npda(&[A, B], 64, 100_000),
+        m.accepts_npda(&[A, B]),
         "the NPDA accepts ab (the n=1)"
     );
     assert!(
-        m.accepts_npda(&[A, A, B, B], 64, 100_000),
+        m.accepts_npda(&[A, A, B, B]),
         "the NPDA accepts aabb (the n=2)"
     );
     assert!(
-        !m.accepts_npda(&[A, B, A], 64, 100_000),
+        !m.accepts_npda(&[A, B, A]),
         "the NPDA rejects aba (the unbalanced)"
     );
 }
@@ -1029,7 +1029,7 @@ fn run_differential(m: &PdaMachine, g: &Cfg, corpus: &[Vec<u32>]) {
     for w in corpus {
         // the PDA input is the local terminal ID (the global - the num_nt)
         let pda_input: Vec<u32> = w.iter().map(|&x| x - num_nt).collect();
-        let pda_says = m.accepts_npda(&pda_input, 64, 1_000_000);
+        let pda_says = m.accepts_npda(&pda_input);
         let oracle_says = cfg_accepts(g, w); // the oracle uses the global IDs
         if pda_says != oracle_says {
             disagreements += 1;
@@ -2433,6 +2433,10 @@ fn rtn_one_or_more_loop_repeats() {
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile the B+ grammar");
+    eprintln!("[DBG B+ machine] num_states={} num_inputs={} num_stack_syms={} accepting={:?}", m.num_states, m.num_inputs, m.num_stack_syms, m.accepting);
+    for t in &m.transitions {
+        eprintln!("[DBG B+ trans] (q={}, a={}, top={}) -> (q={}, push={:?})", t.q, t.a, t.top, t.next_q, t.push);
+    }
     assert!(m.accepts(&[0]), "a single B is in B+");
     assert!(m.accepts(&[0, 0]), "two B's are in B+ (the loop repeats once)");
     assert!(m.accepts(&[0, 0, 0]), "three B's are in B+ (the loop repeats twice)");
@@ -2460,6 +2464,11 @@ fn rtn_nested_loop_with_trailing_symbol_repeats() {
         ],
     );
     let m = pushdown_rs::compile(&g).expect("compile the nested-loop grammar");
+    eprintln!("[DBG machine] num_states={} num_inputs={} num_stack_syms={}", m.num_states, m.num_inputs, m.num_stack_syms);
+    for t in &m.transitions {
+        eprintln!("[DBG machine] (q={}, a={}, top={}) -> (q={}, push={:?})", t.q, t.a, t.top, t.next_q, t.push);
+    }
+    eprintln!("[DBG machine] accepting={:?}", m.accepting);
     assert!(m.accepts(&[0, 1]), "T RE (the single-iteration base case)");
     assert!(m.accepts(&[0, 0, 1]), "T T RE (the loop repeats once)");
     assert!(m.accepts(&[0, 0, 0, 1]), "T T T RE (the loop repeats twice)");
