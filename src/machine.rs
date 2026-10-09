@@ -1256,22 +1256,22 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
     ///
     /// O(reachable_configs x |t| x transitions[q]) via the CSR (the sorted-by-q array).
     pub fn displacement(&self, t: &[u32]) -> Vec<(u32, Vec<u32>, u32, Vec<u32>)> {
-        // The reachable in_configs (the BFS over the PDA's epsilon closure from the
-        // start config, the bounded stack). The advance_eps_set (the config-set
-        // advance, the no the single-config advance_eps) covers the FULL domain
-        // (the non-deterministic paths, the one_or_more loop branches). The CFGzip
-        // displacement Delta_G(t) is the relation over ALL reachable configs, not
-        // the single deterministic path.
-        //
-        // PRECONDITION (the six-property #5, the bounded pushdown): the machine's
-        // stack is bounded by D = max_push + 1 (the max production length + 1, the
-        // pending nesting). The displacement is only well-defined for bounded-stack
-        // machines (the RTN-compiled, the no the hand-built unbounded a^n b^n). The
-        // BFS over the in_configs is finite (the num_states * the num_stack_syms^D
-        // configs), so it terminates. The guard: if the BFS exceeds the finite
-        // domain size, the machine is NOT six-property #5 bounded (the unbounded
-        // stack), and the displacement is undefined (the explicit panic, the no
-        // the silent non-termination).
+        let in_configs = self.reachable_in_configs();
+        self.displacement_from(&in_configs, t)
+    }
+
+    /// The reachable in_configs (the BFS over the PDA's input closure from the start
+    /// config). This is the expensive, machine-invariant part of the displacement: it
+    /// depends only on the machine, not on the input sequence, so it is computed ONCE
+    /// and reused across many displacement queries (the displacement_many).
+    ///
+    /// PRECONDITION (the six-property #5, the bounded pushdown): the machine's stack is
+    /// bounded by D = max_push + 1. The BFS is finite (the num_states * the
+    /// num_stack_syms^D configs), so it terminates. The guard: if the BFS exceeds the
+    /// finite domain size, the machine is NOT six-property #5 bounded (the unbounded
+    /// stack), and the displacement is undefined (the explicit panic, the no the silent
+    /// non-termination).
+    pub fn reachable_in_configs(&self) -> Vec<(u32, Vec<u32>)> {
         let max_push = self.transitions.iter().map(|t| t.push.len()).max().unwrap_or(1);
         let d_bound = max_push + 1; // the six-property #5 stack depth bound.
         // The finite domain size: the num_states * the num_stack_syms^d_bound
@@ -1281,7 +1281,8 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
             * (0..=d_bound).map(|d| self.num_stack_syms.pow(d as u32) as usize).sum::<usize>();
         let mut in_configs: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
         // The dedup set (the (state, full-stack) pairs, the no the O(n^2) Vec::contains).
-        let mut seen: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<(u32, Vec<u32>)> =
+            std::collections::HashSet::new();
         seen.insert((self.start_state, vec![self.start_stack]));
         let mut i = 0;
         while i < in_configs.len() {
@@ -1289,7 +1290,6 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
             for a in 0..self.num_inputs {
                 let next_set = self.advance_eps_set(&[(q, stack.clone())], a);
                 for (nq, ns) in next_set {
-                    // The HashSet dedup (the O(1) amortized, the no the O(n) Vec::contains).
                     if seen.insert((nq, ns.clone())) {
                         in_configs.push((nq, ns));
                     }
@@ -1302,7 +1302,7 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
             // undefined (the explicit panic, the no the silent non-termination).
             if in_configs.len() > domain_size {
                 panic!(
-                    "displacement: the six-property #5 precondition failed (the \
+                    "reachable_in_configs: the six-property #5 precondition failed (the \
                      machine's stack is unbounded, the BFS exceeded the finite domain \
                      size {} (the num_states * the num_stack_syms^d_bound, the d_bound \
                      = {})). The displacement is only defined for bounded-stack \
@@ -1311,14 +1311,19 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
                 );
             }
         }
-        // For each in_config, simulate the PDA over `t` (the terminal sequence) and
-        // collect the (in_config, out_config) pairs. The advance_eps_set (the
-        // config-set advance, the no the single-config advance_eps) covers the
-        // FULL domain (the non-deterministic paths, the one_or_more loop
-        // branches). The CFGzip displacement Delta_G(t) is the relation over
-        // ALL reachable configs, not the single deterministic path.
+        in_configs
+    }
+
+    /// The displacement of a terminal sequence `t` from a FIXED set of in_configs (the
+    /// the no set, the no the per-call BFS). This is the cheap per-sequence part:
+    /// simulate the PDA over `t` from every in_config and collect the (in, out) pairs.
+    fn displacement_from(
+        &self,
+        in_configs: &[(u32, Vec<u32>)],
+        t: &[u32],
+    ) -> Vec<(u32, Vec<u32>, u32, Vec<u32>)> {
         let mut result: Vec<(u32, Vec<u32>, u32, Vec<u32>)> = Vec::new();
-        for (in_q, in_stack) in &in_configs {
+        for (in_q, in_stack) in in_configs {
             let mut configs: Vec<(u32, Vec<u32>)> = vec![(*in_q, in_stack.clone())];
             let mut diverged = false;
             for &a in t {
@@ -1335,6 +1340,17 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
             }
         }
         result
+    }
+
+    /// The displacement of MANY terminal sequences against a SINGLE shared reachable
+    /// in_config set (the the form, the no the per-sequence BFS recomputation). This is
+    /// the production primitive for the bridge (the vocab_size sequences, the one BFS).
+    pub fn displacement_many(&self, sequences: &[Vec<u32>]) -> Vec<Vec<(u32, Vec<u32>, u32, Vec<u32>)>> {
+        let in_configs = self.reachable_in_configs();
+        sequences
+            .iter()
+            .map(|s| self.displacement_from(&in_configs, s))
+            .collect()
     }
 
     /// The displacement partition (the CFGzip Theorem 2): group a set of terminal

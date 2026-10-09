@@ -15,7 +15,7 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput, black_box};
 use pushdown_rs::compile::Cfg;
 use pushdown_rs::machine::PdaMachine;
-use pushdown_rs::pda::PdaStream;
+use pushdown_rs::pda::{Dpda, PdaStream};
 
 // A nested tool-call-style CFG (the DCFL, the bounded stack):
 //   S    -> LBRACE args RBRACE
@@ -168,5 +168,124 @@ fn bench_sequence_length_flat(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_csr_vs_linear_mask, bench_sequence_length_flat, bench_dispatched_gather);
+// A NON-deterministic CFG (the Qwen regime): the start non a genuine choice that
+// the different terminals both reach, so the compiled PDA is is_deterministic()==false
+// and the NPDA frontier ops (advance_eps_set / project_batch / mask_at_cfg) are the
+// hot path. This is the regime where the hang occurs, so we bench it directly.
+fn nondeterministic_cfg() -> Cfg {
+    const S: u32 = 0;
+    const A: u32 = 1;
+    const B: u32 = 2;
+    const X: u32 = 3; // the terminal
+    const Y: u32 = 4; // the terminal
+    Cfg::new(
+        3, // S, A, B
+        2, // X, Y
+        S,
+        vec![
+            (S, vec![A, B]), // S -> A B (the choice point, the non-determinism source)
+            (A, vec![X]),   // A -> X
+            (B, vec![Y]),   // B -> Y
+            (A, vec![Y]),   // A -> Y (A now BOTH X and Y => non-deterministic)
+            (B, vec![X]),   // B -> X (B reaches BOTH too)
+        ],
+    )
+}
+
+fn bench_npda_frontier_ops(c: &mut Criterion) {
+    let g = nondeterministic_cfg();
+    let m = pushdown_rs::compile(&g).expect("compile");
+    assert!(!m.is_deterministic(), "the bench CFG must be non-deterministic (the Qwen regime)");
+    let start = (m.start_state, vec![m.start_stack]);
+    let configs = vec![start.clone()];
+    let drafts = vec![vec![0u32, 1, 0]]; // a 3-step draft over the 2 inputs
+
+    let mut group = c.benchmark_group("pda_npda_frontier");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("advance_eps_set", |b| {
+        b.iter(|| black_box(m.advance_eps_set(&configs, 0)))
+    });
+    group.bench_function("project_batch", |b| {
+        b.iter(|| black_box(m.project_batch(&configs, &drafts)))
+    });
+    group.bench_function("mask_at_cfg", |b| {
+        b.iter(|| black_box(m.mask_at_cfg(start.0, &start.1)))
+    });
+    group.finish();
+}
+
+// A Qwen-scale non-deterministic machine: ~107 states, ~77 stack symbols, a dense
+// epsilon graph (the one_or_more loops). This is the regime where the NPDA frontier
+// explodes and the hang occurs. We synthesize it directly (the no a real) so the
+// bench is reproducible without the 248K-vocab tokenizer.
+fn qwen_scale_npda() -> PdaMachine {
+    use pushdown_rs::machine::Transition;
+    const N: u32 = 107; // states num_states
+    const S: u32 = 77; // the num_stack_syms
+    const I: u32 = 25; // the num_inputs (the 24 terminals + the 1 epsilon)
+    const EPS: u32 = I; // the epsilon input ID
+    let mut transitions: Vec<Transition> = Vec::new();
+    // A dense epsilon graph: every state has an epsilon move to a few others,
+    // pushing stack symbols (the one_or_more re-entry). This reproduces the frontier
+    // blowup that hangs the Qwen machine.
+    for q in 0..N {
+        for k in 0..4u32 {
+            let dest = (q + k + 1) % N;
+            let top = q % S;
+            transitions.push(Transition {
+                q,
+                a: EPS,
+                top,
+                next_q: dest,
+                push: vec![dest % S],
+            });
+        }
+        // A terminal move so the machine is not pure-epsilon.
+        transitions.push(Transition {
+            q,
+            a: q % I,
+            top: q % S,
+            next_q: (q + 1) % N,
+            push: vec![q % S],
+        });
+    }
+    PdaMachine {
+        num_states: N,
+        num_inputs: I,
+        num_stack_syms: S,
+        transitions,
+        accepting: vec![N - 1],
+        start_state: 0,
+        start_stack: 0,
+        state_provenance: None,
+        vocab_names: None,
+        ctrl_offsets: vec![],
+        ctrl_counts: vec![],
+        flat_a: vec![],
+        flat_top: vec![],
+        flat_next_q: vec![],
+    }
+}
+
+fn bench_qwen_scale_npda(c: &mut Criterion) {
+    let m = qwen_scale_npda();
+    let start = (m.start_state, vec![m.start_stack]);
+    let configs = vec![start.clone()];
+    let drafts = vec![vec![0u32, 1, 2, 3, 4]];
+
+    let mut group = c.benchmark_group("pda_qwen_scale_npda");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("advance_eps_set", |b| {
+        b.iter(|| black_box(m.advance_eps_set(&configs, 0)))
+    });
+    group.bench_function("project_batch", |b| {
+        b.iter(|| black_box(m.project_batch(&configs, &drafts)))
+    });
+    group.bench_function("mask_at_cfg", |b| {
+        b.iter(|| black_box(m.mask_at_cfg(start.0, &start.1)))
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_csr_vs_linear_mask, bench_sequence_length_flat, bench_dispatched_gather, bench_npda_frontier_ops, bench_qwen_scale_npda);
 criterion_main!(benches);
