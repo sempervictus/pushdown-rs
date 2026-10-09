@@ -527,12 +527,17 @@ impl PdaMachine {
     /// - `NonDeterministic`: `num_states` (the pigeonhole, the the star-loop re-entry grows the
     ///   stack by one return-address per iteration, the no bound tighter than the control states).
     pub fn closure_depth_bound(&self) -> usize {
+        // The bound for the FRONTIER (the the advance_eps_set, the the loop preservation). The
+        // VPA/D the Deterministic WITH a growth cycle (the the star-loop, the the one_or_more
+        // re-entry, the the Qwen tool-call) needs the FULL depth (the num_states, the the
+        // pigeonhole) to preserve the loop back-edge (the the stack grows by one return-address
+        // per iteration, the the no the tight bound_stack_depth which truncates the loop). The
+        // VPA / the Deterministic WITHOUT a growth cycle (the the bounded nesting, the the no
+        // star-loop) the tight max_stack_depth (the the nesting depth). The NonDeterministic
+        // (the the general NPDA, the the no VPA structure) is always the full num_states (the the
+        // frontier, the the no the tight bound is not sound).
         match self.classify() {
             PdaKind::VisiblyPushdown => {
-                // The VPA with a growth cycle (the the star-loop, the the one_or_more re-entry)
-                // needs the full depth (the num_states, the the pigeonhole) to preserve the loop
-                // back-edge. The VPA without a growth cycle (the the bounded nesting, the the JSON
-                // star-loop) the tight max_stack_depth (the the nesting depth).
                 if self.has_epsilon_growth_cycle() {
                     self.num_states as usize
                 } else {
@@ -1248,15 +1253,27 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
         //   different stacks have different futures). The depth bound is num_states (the pigeonhole,
         //   the star-loop re-entry grows the stack by one return-address per iteration).
         // The kind dispatch (the programmatic determination, the the classify).
-        // The full-stack dedup is required when the machine has an epsilon growth cycle (the
-        // star-loop re-entry: the cycle keeps the top constant while the stack grows, so the
-        // (state, top) dedup prematurely terminates the BFS before misses the terminal states that
-        // are only reachable at a deeper stack). This is true for the NonDeterministic kind AND
-        // for the Deterministic kind with a growth cycle (the the star-loop that is still
-        // deterministic, the the single-path but the stack-growing re-entry). The (state, top)
-        // dedup is sound only when there is NO growth cycle (the VPA / the bounded-nesting / the
-        // acyclic-epsilon case, the GreatGramma Prop 3.5 invariance).
-        let full_stack = self.has_epsilon_growth_cycle();
+        // The mask_at_cfg dispatches on the PDA KIND (the the classify, the the programmatic
+        // determination), NOT on the growth cycle alone. The VPA (the the well-nested, the the
+        // JSON) uses the (state, top) dedup (the the GreatGramma Prop 3.5 invariance, the the
+        // sound + the cheap, the the O(num_states x num_stack_syms) bounded closure). The general
+        // NPDA (the the non-VPA star-loop, the the ambiguous grammar) uses the full-stack dedup
+        // (the the lossless, the the no the (state, top) collapse that drops the loop branch).
+        //
+        // The growth cycle (the the has_epsilon_growth_cycle) is the DISTINGUISHING property for
+        // the advance_eps_set (the the frontier, the the loop preservation), NOT for the mask_at_cfg
+        // (the the mask, the the bounded). The VPA mask is the bounded (the the (state, top) dedup,
+        // the the tight); even when the VPA has a growth cycle (the the star-loop, the the advance_eps_set
+        // needs the full depth, but the mask_at not).
+        let kind = self.classify();
+        let full_stack = matches!(kind, PdaKind::NonDeterministic);
+        // The mask_at_cfg uses the closure_depth_bound (the the dispatch-aware bound): the VPA /
+        // the Deterministic WITH a growth cycle (the the star-loop, the the Qwen tool-call) needs
+        // the FULL depth (the num_states, the the loop state is at depth > the max_stack_depth,
+        // the the tight bound truncates the mask). The VPA / the Deterministic WITHOUT a growth
+        // cycle (the the bounded nesting, the the no star-loop) the tight max_stack_depth (the
+        // the O(1-3) mask). The (state, top) dedup is sound for the VPA (the the GreatGramma Prop
+        // 3.5 invariance), so the full_stack is only for the general NPDA (the the no-VPA).
         let depth_bound = self.closure_depth_bound();
         let mut closed: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
         let use_csr = !self.ctrl_offsets.is_empty();
