@@ -633,17 +633,12 @@ impl PdaMachine {
                         break;
                     }
                 }
-                // The growth cycle: the SCC has > 1 state AND contains a growth edge (the the that
-                // re-enters the SCC). For the RTN star-loop, the call/return re-entry forms an SCC
-                // of size > 1 with a growth edge.
+                // The growth cycle: the SCC has > 1 state (the the cycle). Any the RTN star-loop,
+                // the call/return re-entry forms an SCC of size > 1. The stack grows by one
+                // return address per iteration (the the push.len() can be 1 or 2), so ANY cycle
+                // in the epsilon graph is a growth cycle (the the full-stack dedup is needed).
                 if scc_size > 1 {
-                    let node_set: std::collections::HashSet<u32> = scc_nodes.into_iter().collect();
-                    for &(gq, gw) in growth {
-                        if node_set.contains(&gq) && node_set.contains(&gw) {
-                            scc_has_growth[*scc_count] = true;
-                            break;
-                        }
-                    }
+                    scc_has_growth[*scc_count] = true;
                 }
                 *scc_count += 1;
             }
