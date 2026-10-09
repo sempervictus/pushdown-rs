@@ -69,6 +69,38 @@ headers). The FFI D-bound (the cuda.rs PdaSeqState stack[8], the pda_example.cu
 D_MAX 8) is this constant = max_rhs+1 for the target grammars (the max_rhs <= 7,
 the D = 8), NOT a magic number.
 
+## The VPA fast-path (the the O(1-3) settled mask, the no the closure BFS)
+
+The JSON / the well-nested grammars are VisiblyPushdown (the the stack-op is a
+function of the input symbol, the the Madhusudan VPA property). For these, the
+mask at a SETTLED config (the no pending epsilon moves) is EXACTLY the settled
+gate (the mask_at_cfg_settled, the O(1-3) CSR lookup), the no the closure BFS.
+The iterative closure BFS thrashes the CPU on every token for the VPA case (the
+the 115µs/call vs the 57µs legacy, the the PDA is SLOWER than the fallback).
+
+The `mask_at_cfg` dispatchpa fast-path: when the machine is classified as
+`VisiblyPushdown` AND the current (state, top) has NO epsilon successor (the
+`has_epsilon_successor` is false, the the settled config), the mask is the
+O(1-3) `mask_at_cfg_settled` (the no the BFS). When the state HAS an epsilon
+successor (the the choice state, the the call-dot), the closure is needed (the
+the fall through to the (state, top) BFS, the the GreatGramma Prop 3.5 sound).
+
+The `advance_eps_set` (the NPDA frontier step, the the loop preservation) uses
+the FULL depth (the num_states, the the pigeonhole), the no the tight
+`closure_depth_bound` (the the VPA max_stack_depth truncates the one_or_more
+re-entry, the the test_qwen_plus_loop_back_edge regression). The mask_at_cfg
+(the the mask, the the bounded) uses the tight `closure_depth_bound`; the
+advance_eps_set (the the frontier, the the loop) uses the full_states.
+
+CITATIONS:
+- Madhusudan et al. (the Visibly Pushdown Automata, the the well-nested
+  languages, the the O(1) mask at a settled config).
+- GreatGramma (Park, Zhou, D'Antoni, arXiv:2502.05111) Prop 3.5 (the stack
+  invariance, the the (state, top) dedup soundness for the VPA / the bounded).
+- The six-property #5 (the bounded pushdown, the the max_stack_depth, the the
+  tight_stateless_grammar.md).
+- The pigeonhole principle (the the num_states depth bound for the growth cycle).
+
 ## The PdaKind dispatch (the programmatic type determination, the tight bound per kind)
 
 The epsilon-closure BFS (the mask_at_cfg, the advance_eps) must terminate with a

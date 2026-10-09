@@ -81,6 +81,10 @@ The key groups:
     top) dedup would terminates the BFS), else the (state, top) dedup (the
     VPA / the bounded case, the GreatGramma Prop 3.5 sound). The depth bound is
     the closure_depth_bound (the tight per kind, the no a synthetic cap).
+- The has_epsilon_successor(q, top) - the O(counts[q]) CSR check for whether the
+    state q has a pending epsilon move at stack-top top (the the choice/call/return/exit    exit, the the state-driven epsilon). This is the settled-config test for the VPA
+    fast-path in mask_at_cfg (the the O(1-3) settled mask when there is no pending
+    epsilon, the the closure BFS when there is).
 - The classify() -> PdaKind - the programmatic type determination (the the
     dispatch key). The most-specific-first: is_visibly_pushdown (the stack-op
     class is a function of the input symbol alone, the VPA property) -> the
