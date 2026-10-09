@@ -71,11 +71,31 @@ The key groups:
    transition lookups per state (instead of O(total_transitions) linear scan).
    The step_batch / the project_batch use it.
 - The mask_at_cfg(q, stack) - the single-config epsilon-closure mask (the
-   allowed inputs reachable via the epsilon moves); exactly the set for which
-   advance_eps succeeds (the proof_mask_batch_consistent_with_advance_eps).
-   The batched form is mask_batch. CSR-based (the O(counts[q]) scan of q's
-   transitions, the sorted-by-q array) with the linear fallback (the hand-built
-   machines, the no CSR). The proof_mask_at_cfg_csr_equals_linear gates it.
+    allowed inputs reachable via the epsilon moves); exactly the set for which
+    advance_eps succeeds (the proof_mask_batch_consistent_with_advance_eps).
+    The batched form is mask_batch. CSR-based (the O(counts[q]) scan of q's
+    transitions, the sorted-by-q array) with the linear fallback (the hand-built
+    machines, the no CSR). The proof_mask_at_cfg_csr_equals_linear gates it.
+    Theed on the PdaKind (the classify): the full-stack (state, Vec) dedup
+    when the machine has an epsilon growth cycle (the star-loop, the the (state,
+    top) dedup would terminates the BFS), else the (state, top) dedup (the
+    VPA / the bounded case, the GreatGramma Prop 3.5 sound). The depth bound is
+    the closure_depth_bound (the tight per kind, the no a synthetic cap).
+- The classify() -> PdaKind - the programmatic type determination (the the
+    dispatch key). The most-specific-first: is_visibly_pushdown (the stack-op
+    class is a function of the input symbol alone, the VPA property) -> the
+    VisiblyPushdown; is_deterministic (the no duplicate (q, a, top)) -> the
+    Deterministic; else the NonDeterministic.
+- The has_epsilon_growth_cycle() - the Tarjan SCC over the epsilon graph; a
+    growth cycle exists iff an SCC of size > 1 contains a growth edge (the
+    push.len() >= 2, the the that re-enters the SCC). This is the distinguishing
+    property for the dedup dispatch (the the star-loop needs the full-stack, the
+    the VPA / the bounded-nesting the (state, top) is sound).
+- The closure_depth_bound() - the tight epsilon-closure depth bound per kind
+    (the VisiblyPushdown -> the max_stack_depth, the Deterministic -> the
+    max_stack_depth when no growth cycle else num_states, the NonDeterministic
+
+    the num_states). The machine-derived termination (the no a synthetic cap).
 - The mask_at_cfg_settled(q, top) - the precise settled mask (the EXACT inputs
     with a defined transition at (q, a, top), the no epsilon-closure). CSR-based
     (the O(counts[q]) scan) with the linear fallback. The proof_mask_settled_csr_

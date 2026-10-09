@@ -69,6 +69,47 @@ headers). The FFI D-bound (the cuda.rs PdaSeqState stack[8], the pda_example.cu
 D_MAX 8) is this constant = max_rhs+1 for the target grammars (the max_rhs <= 7,
 the D = 8), NOT a magic number.
 
+## The PdaKind dispatch (the programmatic type determination, the tight bound per kind)
+
+The epsilon-closure BFS (the mask_at_cfg, the advance_eps) must terminate with a
+synthetic cap, AND use the tightest dedup that is sound for the machine. The soundness
+of the (state, top) dedup (the GreatGramma Prop 3.5 invariance: the mask depends only on
+(state, top), not the deeper stack) holds ONLY when the machine has no epsilon growth
+cycle. A star-loop (the one_or_more re-entry) has a growth cycle: the cycle keeps the
+top constant while the stack grows, so the (state, top) dedup prematurely terminates the
+BFS before reaching the terminal states that are only reachable at a deeper stack (the
+mask is empty, the under-approximation, the draft acceptance breaks).
+
+The dispatch is programmatic (the no the caller guessing the kind):
+
+- `classify() -> PdaKind`: the most-specific-first determination. `is_visibly_pushdown`
+  (the stack-op class is a function of the input symbol alone, the VPA property: for each
+  input a, all transitions consuming a have the same push-length class — the call
+  (push.len() >= 2), the return (push.len() == 0), the internal (push.len() == 1)) -> the
+  VisiblyPushdown. Else `is_deterministic` (the no duplicate (q, a, top)) -> the
+  Deterministic. Else the NonDeterministic.
+- `has_epsilon_growth_cycle()`: the Tarjan SCC over the epsilon graph (the states = nodes,
+  the epsilon moves = edges). A growth cycle exists iff an SCC of size > 1 contains a
+  growth edge (the push.len() >= 2, the call that re-enters the SCC). This is the
+  distinguishing property: the star-loop (the growth cycle) needs the full-stack dedup; the
+  VPA / the bounded-nesting (the no growth cycle) the (state, top) dedup is sound.
+- `closure_depth_bound()`: the tight bound per kind. VisiblyPushdown -> the
+  max_stack_depth (the nesting depth, the bounded). Deterministic -> the max_stack_depth
+  when no growth cycle, else num_states (the pigeonhole). NonDeterministic -> the num_states.
+
+The mask_at_cfg / the advance_eps dispatch on `has_epsilon_growth_cycle` (the the-stack
+(state, Vec) dedup when there is a growth cycle, the (state, top) dedup when there is not),
+with the `closure_depth_bound` termination. The linear reference (the
+mask_at_cfg_linear_reference) matches the dispatch, so the proof_mask_at_cfg_csr_equals_
+linear (the CSR == the linear, the three-way identity) holds.
+
+CITATIONS:
+- GreatGramma (Park, Zhou, D'Antoni, arXiv:2502.05540) Prop 3.5 (the stack invariance,
+  the (state, top) dedup soundness condition).
+- The six-property #5 (the bounded pushdown, the finite stackless_grammar.md).
+- The pigeonhole principle (the num_states depth bound for the growth cycle).
+- Tarjan's SCC (the growth-cycle detection).
+
 ## The unbounded weighted-PDS distance (the S, the no the S_H)
 
 The unbounded distance d(c) is the least fixed point of the distance equations
