@@ -1280,13 +1280,17 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
         let domain_size = (self.num_states as usize)
             * (0..=d_bound).map(|d| self.num_stack_syms.pow(d as u32) as usize).sum::<usize>();
         let mut in_configs: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
+        // The dedup set (the (state, full-stack) pairs, the no the O(n^2) Vec::contains).
+        let mut seen: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+        seen.insert((self.start_state, vec![self.start_stack]));
         let mut i = 0;
         while i < in_configs.len() {
             let (q, stack) = in_configs[i].clone();
             for a in 0..self.num_inputs {
                 let next_set = self.advance_eps_set(&[(q, stack.clone())], a);
                 for (nq, ns) in next_set {
-                    if !in_configs.contains(&(nq, ns.clone())) {
+                    // The HashSet dedup (the O(1) amortized, the no the O(n) Vec::contains).
+                    if seen.insert((nq, ns.clone())) {
                         in_configs.push((nq, ns));
                     }
                 }
