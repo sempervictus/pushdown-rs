@@ -76,15 +76,17 @@ The key groups:
     The batched form is mask_batch. CSR-based (the O(counts[q]) scan of q's
     transitions, the sorted-by-q array) with the linear fallback (the hand-built
     machines, the no CSR). The proof_mask_at_cfg_csr_equals_linear gates it.
-    Theed on the PdaKind (the classify): the full-stack (state, Vec) dedup
-    when the machine has an epsilon growth cycle (the star-loop, the the (state,
-    top) dedup would terminates the BFS), else the (state, top) dedup (the
-    VPA / the bounded case, the GreatGramma Prop 3.5 sound). The depth bound is
-    the closure_depth_bound (the tight per kind, the no a synthetic cap).
+    The mask_at_cfg dispatches the DEDUP KEY on the PdaKind (the classify): the VPA / the
+    Deterministic use the (state, top) dedup (the the GreatGramma Prop 3.5 invariance, the
+    the sound + the cheap); the NonDeterministic uses the full-stack (state, Vec) dedup (the
+    the lossless, the the no the (state, top) collapse that drops the loop branch). The depth
+    bound is the closure_depth_bound (the dispatch-aware: the growth cycle -> the num_states,
+    the no growth cycle -> the max_stack_depth, the no a synthetic cap).
 - The has_epsilon_successor(q, top) - the O(counts[q]) CSR check for whether the
-    state q has a pending epsilon move at stack-top top (the the choice/call/return/exit    exit, the the state-driven epsilon). This is the settled-config test for the VPA
-    fast-path in mask_at_cfg (the the O(1-3) settled mask when there is no pending
-    epsilon, the the closure BFS when there is).
+    state q has a pending epsilon move at stack-top top (the the choice/call/return/exit,
+    the the state-driven epsilon). This is the settled-config test for the VPA fast-path in
+    mask_at_cfg (the the O(1-3) settled mask when there is no pending epsilon, the the
+    closure BFS when there is).
 - The classify() -> PdaKind - the programmatic type determination (the the
     dispatch key). The most-specific-first: is_visibly_pushdown (the stack-op
     class is a function of the input symbol alone, the VPA property) -> the
@@ -92,14 +94,13 @@ The key groups:
     Deterministic; else the NonDeterministic.
 - The has_epsilon_growth_cycle() - the Tarjan SCC over the epsilon graph; a
     growth cycle exists iff an SCC of size > 1 contains a growth edge (the
-    push.len() >= 2, the the that re-enters the SCC). This is the distinguishing
-    property for the dedup dispatch (the the star-loop needs the full-stack, the
-    the VPA / the bounded-nesting the (state, top) is sound).
-- The closure_depth_bound() - the tight epsilon-closure depth bound per kind
-    (the VisiblyPushdown -> the max_stack_depth, the Deterministic -> the
-    max_stack_depth when no growth cycle else num_states, the NonDeterministic
-
-    the num_states). The machine-derived termination (the no a synthetic cap).
+    push.len() >= 2, the the call that re-enters the SCC). This is the distinguishing
+    property for the depth bound (the the star-loop needs the full num_states, the
+    the VPA / the bounded-nesting the tight max_stack_depth).
+- The closure_depth_bound() - the dispatch-aware epsilon-closure depth bound per kind
+    (the VisiblyPushdown / the Deterministic WITH a growth cycle -> the num_states, the
+    WITHOUT -> the max_stack_depth, the NonDeterministic -> the num_states). The
+    machine-derived termination (the no a synthetic cap).
 - The mask_at_cfg_settled(q, top) - the precise settled mask (the EXACT inputs
     with a defined transition at (q, a, top), the no epsilon-closure). CSR-based
     (the O(counts[q]) scan) with the linear fallback. The proof_mask_settled_csr_

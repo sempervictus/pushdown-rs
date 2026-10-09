@@ -125,15 +125,25 @@ The dispatch is programmatic (the no the caller guessing the kind):
   growth edge (the push.len() >= 2, the call that re-enters the SCC). This is the
   distinguishing property: the star-loop (the growth cycle) needs the full-stack dedup; the
   VPA / the bounded-nesting (the no growth cycle) the (state, top) dedup is sound.
-- `closure_depth_bound()`: the tight bound per kind. VisiblyPushdown -> the
-  max_stack_depth (the nesting depth, the bounded). Deterministic -> the max_stack_depth
-  when no growth cycle, else num_states (the pigeonhole). NonDeterministic -> the num_states.
+- `closure_depth_bound()`: the dispatch-aware bound. VisiblyPushdown / the Deterministic
+  WITH a growth cycle (the the star-loop, the the one_or_more re-entry, the the Qwen tool-
+  call) -> the num_states (the the pigeonhole, the the loop state is at depth > the
+  max_stack_depth, the the tight bound truncates the mask). WITHOUT a growth cycle (the the
+  bounded nesting, the the no star-loop) -> the max_stack_depth (the the nesting depth, the
+  the O(1-3) mask). NonDeterministic (the the general NPDA, the the no VPA structure) -> the
+  num_states always (the the frontier, the the no the tight bound is not sound).
 
-The mask_at_cfg / the advance_eps dispatch on `has_epsilon_growth_cycle` (the the-stack
-(state, Vec) dedup when there is a growth cycle, the (state, top) dedup when there is not),
-with the `closure_depth_bound` termination. The linear reference (the
-mask_at_cfg_linear_reference) matches the dispatch, so the proof_mask_at_cfg_csr_equals_
-linear (the CSR == the linear, the three-way identity) holds.
+The mask_at_cfg dispatches the DEDUP KEY on the P (the the classify): the VPA / the
+Deterministic use the (state, top) dedup (the the GreatGramma Prop 3.5 invariance, the the
+sound + the cheap, the the O(num_states x num_stack_syms) bounded closure); the
+NonDeterministic uses the full-stack (state, Vec) dedup (the the lossless, the the no the
+(state, top) collapse that drops the loop branch). The DEPTH BOUND is the
+closure_depth_bound (the the dispatch-aware, the the num_states for the growth-cycle, the
+the max_stack_depth for the bounded). The advance_eps_set (the the frontier, the the loop
+preservation) ALWAYS uses the full num_states depth (the the loop back-edge), the no the
+tight bound. The linear reference (the mask_at_cfg_linear_reference) matches the dispatch,
+so the proof_mask_at_cfg_csr_equals_linear (the CSR == the linear, the the three-way
+identity) holds.
 
 CITATIONS:
 - GreatGramma (Park, Zhou, D'Antoni, arXiv:2502.05540) Prop 3.5 (the stack invariance,
