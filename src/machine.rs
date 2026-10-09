@@ -667,11 +667,13 @@ impl PdaMachine {
             let mut closed: Vec<(u32, Vec<u32>)> = vec![(*q, stk.clone())];
             let mut seen: HashSet<(u32, Vec<u32>)> = HashSet::new();
             seen.insert((*q, stk.clone()));
-            // The stack-depth bound for the closure: a reachable stack holds one return-address
-            // per active nonterminal frame, and there are at most num_states distinct frames, so
-            // no reachable stack exceeds num_states. This is the machine-derived bound (the no a
-            // synthetic constant) that terminates the BFS on the one_or_more re-entry (which
-            // otherwise grows the stack without bound) while preserving every reachable loop.
+            // The stack-depth bound for the closure: the advance_eps_set is the NPDA frontier step (the the
+            // loop preservation), so it needs the FULL depth (the num_states, the the pigeonhole) to
+            // preserve the one_or_more re-entry (the the stack grows by one return-address per
+            // iteration, the the no the tight max_stack_depth which truncates the loop). The
+            // mask_at_cfg (the the mask, the the bounded) uses the tight closure_depth_bound (the
+            // the VPA max_stack_depth), but the advance_eps_set (the the frontier, the the loop)
+            // uses the num_states (the the full depth, the the loop preservation).
             let depth_bound = self.num_states as usize;
             let mut i = 0;
             while i < closed.len() {
@@ -1183,6 +1185,43 @@ impl PdaMachine {
     /// `proof_mask_batch_consistent_with_advance_eps`). `mask_batch` is the
     /// batched form of this same computation.
 pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
+        // The VPA fast-path (the the algorithmic bypass, the no the iterative closure BFS):
+        // for a VisiblyPushdown machine, the stack behavior is a function of the input symbol
+        // (the call / the return / the internal, the the Madhusudan VPA property). At a SETTLED
+        // config (the no pending epsilon moves that change the stack top), the mask is EXACTLY the
+        // settled gate (the mask_at_cfg_settled, the O(1-3) CSR lookup), the no the closure BFS.
+        //
+        // The soundness: the VPA property guarantees that the stack top is fully determined by
+        // the input history (the the call/return matching), so two configs with the same (state, top)
+        // have the same future (the GreatGramma Prop 3.5 invariance). The settled mask (the the
+        // inputs with a defined transition at (q, a, top)) is therefore the exact mask (the no the
+        // closure needed). This is the JSON / the well-nested case (the the VPL), where the iterative
+        // BFS thrashes the CPU on every token.
+        //
+        // The VPA is at a settled config when the current (state, top) has NO epsilon move that
+        // changes the top (the the call/return are input-driven, the no epsilon-driven). For the RTN-
+        // compiled VPA, the epsilon moves are the choice/call/return/exit (the the state-driven), so
+        // the settled check is: the mask_at_cfg_settled is non-empty OR the state has no epsilon
+        // successor that changes the top. The conservative case (the the state HAS an epsilon
+        // successor) falls through to the closure BFS (the the correct, the no the fast).
+        if self.classify() == PdaKind::VisiblyPushdown {
+            let top = stack.last().copied().unwrap_or(self.start_stack);
+            // The settled mask (the the O(1-3) CSR lookup, the the inputs at the current (state, top)).
+            let settled = self.mask_at_cfg_settled(q, top);
+            // The VPA is at a settled config when the state has NO epsilon successor that changes
+            // the top (the the choice/call/return/exit are the input epsilon moves, the the VPA's
+            // stack is input-driven, the no epsilon-driven). If the state has an epsilon successor,
+            // the closure is needed (the the fall through to the BFS, the the correct).
+            let has_eps_succ = self.has_epsilon_successor(q, top);
+            if !has_eps_succ {
+                return settled; // the the O VPA config (the the O(1-3) mask, the no the BFS)
+            }
+            // The the VPA config with pending epsilon moves (the the choice state): the the call-dot):
+            // the closure is needed. But for the VPA, the epsilon closure is a SINGLE deterministic
+            // path (the no the branching, the the VPA property), so the (state, top) dedup is sound
+            // (the the GreatGramma Prop 3.5). Fall through to the (state, top) closure (the the cheap,
+            // the no the full-stack).
+        }
         // The epsilon-closure mask, dispatched on the machine's PDA kind (the classify, the
         // programmatic determination). The kind selects the tight dedup + depth bound:
         //
@@ -1390,6 +1429,37 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
             }
         }
         max_width
+    }
+
+    /// Whether the state `q` has an epsilon successor at stack-top `top` (the the choice/call/return/
+    /// exit move, the the state-driven epsilon). For the VPA fast-path in mask_at_cfg: if the state
+    /// has NO epsilon successor, it is at a settled config (the the O(1-3) mask_at_cfg_settled is
+    /// the exact mask, the no the closure BFS). If it HAS an epsilon successor (the the choice state,
+    /// the the call-dot), the closure is needed (the the fall through to the BFS).
+    ///
+    /// O(counts[q]) via the CSR (the the sorted-by-q array); the linear fallback for the hand-built
+    /// machines (the no CSR).
+    pub fn has_epsilon_successor(&self, q: u32, top: u32) -> bool {
+        if self.ctrl_offsets.is_empty() {
+            // The linear fallback (the the hand-built machine, the no CSR).
+            return self
+                .transitions
+                .iter()
+                .any(|t| t.q == q && t.a == self.num_inputs && t.top == top);
+        }
+        // The CSR fast path: scan only q's transitions (the O(counts[q]), the the sorted-by-q array).
+        let start = self
+            .ctrl_offsets
+            .get(q as usize)
+            .copied()
+            .unwrap_or(self.transitions.len() as u32) as usize;
+        let count = self.ctrl_counts.get(q as usize).copied().unwrap_or(0) as usize;
+        for t in &self.transitions[start..start + count] {
+            if t.a == self.num_inputs && t.top == top {
+                return true;
+            }
+        }
+        false
     }
 
     /// The the mask at a SINGLE settled config (the (state, stack-top)) - the
