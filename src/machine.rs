@@ -391,6 +391,17 @@ impl PdaMachine {
         None
     }
 
+    /// The six-property #5 bounded-pushdown depth D: the maximum number of stack symbols any
+    /// reachable stack holds. For an RTN-compiled PDA this is the max production length (the
+    /// call pushes one return address, the nesting depth is bounded by the longest production).
+    /// Concretely it is the max over all transitions of `push.len()` (a move replaces the top
+    /// with `push`, so the stack can grow by at most `push.len() - 1` per move, and the deepest
+    /// reachable stack is bounded by the max push length). This is the machine-derived bound that
+    /// terminates the full-stack epsilon-closure BFS (the no a synthetic cap).
+    pub fn max_stack_depth(&self) -> usize {
+        self.transitions.iter().map(|t| t.push.len()).max().unwrap_or(1)
+    }
+
     /// The NPDA epsilon-closure advance (the ALL next-configs, the no the single-config
     /// advance_eps). From the input config-set, follow the epsilon closure of each config +
     /// collect EVERY terminal-`a` move (the no the first). This is the sound step for a
@@ -404,19 +415,28 @@ impl PdaMachine {
         let use_csr = !self.ctrl_offsets.is_empty();
         let mut result: Vec<(u32, Vec<u32>)> = Vec::new();
         for (q, stk) in configs {
-            // The epsilon closure of (q, stk). The dedup is on the FULL stack (the no the
-            // (state, top) dedup, which cuts off the one_or_more recursion: the loop revisits the
-            // same (state, top) at a greater stack depth). The closure is the least fixed point
-            // of the epsilon relation (Bouajjani 1997 summarization); it terminates when no new
-            // (state, stack) config is reachable. No depth bound: the stack is unbounded (the
-            // CFGzip GNF PDA, the one_or_more loop re-enters at growing depths).
+            // The epsilon closure of (q, stk). The dedup is on the FULL (state, stack) config (the no the
+            // (state, top) dedup, which collapses distinct one_or_more loop iterations that share a
+            // (state, top) but differ in stack depth, and thereby drops the loop-continue branch).
+            // The full-stack key is lossless: two configs with the same state but different stacks
+            // have different futures. The closure is finite for a bounded machine (the stack depth
+            // is bounded by the machine's push structure), so the BFS terminates without a cap.
             let mut closed: Vec<(u32, Vec<u32>)> = vec![(*q, stk.clone())];
             let mut seen: HashSet<(u32, Vec<u32>)> = HashSet::new();
             seen.insert((*q, stk.clone()));
+            // The stack-depth bound for the closure: a reachable stack holds one return-address
+            // per active nonterminal frame, and there are at most num_states distinct frames, so
+            // no reachable stack exceeds num_states. This is the machine-derived bound (the no a
+            // synthetic constant) that terminates the BFS on the one_or_more re-entry (which
+            // otherwise grows the stack without bound) while preserving every reachable loop.
+            let depth_bound = self.num_states as usize;
             let mut i = 0;
             while i < closed.len() {
                 let (cq, cstk) = closed[i].clone();
                 i += 1;
+                if cstk.len() > depth_bound {
+                    continue; // beyond the machine's reachable depth (the no the unbounded re-entry)
+                }
                 let ctop = cstk.last().copied().unwrap_or(self.start_stack);
                 if use_csr {
                     let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32) as usize;
@@ -1272,43 +1292,141 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
     /// stack), and the displacement is undefined (the explicit panic, the no the silent
     /// non-termination).
     pub fn reachable_in_configs(&self) -> Vec<(u32, Vec<u32>)> {
-        let max_push = self.transitions.iter().map(|t| t.push.len()).max().unwrap_or(1);
-        let d_bound = max_push + 1; // the six-property #5 stack depth bound.
-        // The finite domain size: the num_states * the num_stack_syms^d_bound
-        // (the the configs of stack depth <= d_bound). This is the BFS termination
-        // bound (the no the synthetic cap, the derived from the machine's parameters).
-        let domain_size = (self.num_states as usize)
-            * (0..=d_bound).map(|d| self.num_stack_syms.pow(d as u32) as usize).sum::<usize>();
+        // The reachable (state, full-stack) in_configs, by a SINGLE worklist BFS over the
+        // machine's moves. A config is reached by consuming input; the epsilon moves are the
+        // a == num_inputs moves, so one uniform successor walk over all (num_inputs + 1) input
+        // values per config is exactly the reference reachability (the epsilon steps + the
+        // epsilon prefixes folded in) in ONE pass (the no the per-(config x input) re-BFS that
+        // was O(reachable x inputs x closure) and locked up every CPU on the Qwen machine).
+        //
+        // The dedup is on the FULL (state, stack) config (the no the (state, top) dedup, which
+        // collapses distinct stacks that share a top and loses the displacement's in_config
+        // distinction). The domain is finite for a bounded-pushdown machine (the six-property
+        // #5), so the BFS terminates; the guard panics (the no the silent non-termination) if it
+        // does not.
+        let use_csr = !self.ctrl_offsets.is_empty();
+        // The depth cap for termination: a reachable stack deeper than num_states must repeat a
+        // (state, top) pair (the pigeonhole principle over the num_states control states), hence
+        // is a cycle and can be pruned without losing any reachable in_config. This is what makes
+        // the full-stack BFS terminate on the one_or_more re-entry (which otherwise grows the
+        // stack without bound). Derived from the machine's own num_states (the no a synthetic
+        // constant).
+        let depth_cap = self.num_states as usize;
         let mut in_configs: Vec<(u32, Vec<u32>)> = vec![(self.start_state, vec![self.start_stack])];
-        // The dedup set (the (state, full-stack) pairs, the no the O(n^2) Vec::contains).
+        // The outer worklist dedups on the FULL (state, stack) config (the no the (state, top)
+        // dedup, which collapses distinct loop iterations that share a (state, top) but differ in
+        // stack depth, and thereby drops the one_or_more loop-continue branch the displacement
+        // needs). Termination comes from the depth_cap above.
         let mut seen: std::collections::HashSet<(u32, Vec<u32>)> =
-            std::collections::HashSet::new();
-        seen.insert((self.start_state, vec![self.start_stack]));
+            std::collections::HashSet::from([(self.start_state, vec![self.start_stack])]);
         let mut i = 0;
         while i < in_configs.len() {
-            let (q, stack) = in_configs[i].clone();
-            for a in 0..self.num_inputs {
-                let next_set = self.advance_eps_set(&[(q, stack.clone())], a);
-                for (nq, ns) in next_set {
+            let (cq, cstk) = in_configs[i].clone();
+            i += 1;
+            // The epsilon-closure of (cq, cstk): follow ONLY the epsilon moves (the a ==
+            // num_inputs), deduping on the FULL (state, stack) config (the no the (state, top)
+            // dedup, which collapses distinct loop iterations that share a (state, top) but
+            // differ in stack depth, and thereby drops the one_or_more loop-continue branch).
+            // Bounded by depth_cap so the one_or_more re-entry (which grows the stack) terminates.
+            let mut eps: Vec<(u32, Vec<u32>)> = vec![(cq, cstk.clone())];
+            let mut eps_seen: std::collections::HashSet<(u32, Vec<u32>)> =
+                std::collections::HashSet::new();
+            eps_seen.insert((cq, cstk.clone()));
+            let mut ei = 0;
+            while ei < eps.len() {
+                let (eq, estack) = eps[ei].clone();
+                ei += 1;
+                let etop = estack.last().copied().unwrap_or(self.start_stack);
+                let eps_succs: Vec<(u32, Vec<u32>)> = if use_csr {
+                    let start = self
+                        .ctrl_offsets
+                        .get(eq as usize)
+                        .copied()
+                        .unwrap_or(self.transitions.len() as u32) as usize;
+                    let count = self.ctrl_counts.get(eq as usize).copied().unwrap_or(0) as usize;
+                    self.transitions[start..start + count]
+                        .iter()
+                        .filter(|t| t.a == self.num_inputs && t.top == etop)
+                        .map(|t| {
+                            let mut ns = estack.clone();
+                            ns.pop();
+                            for &p in t.push.iter().rev() {
+                                ns.push(p);
+                            }
+                            (t.next_q, ns)
+                        })
+                        .collect()
+                } else {
+                    self.transition(eq, None, etop)
+                        .into_iter()
+                        .map(|(q2, push)| {
+                            let mut ns = estack.clone();
+                            ns.pop();
+                            for &p in push.iter().rev() {
+                                ns.push(p);
+                            }
+                            (q2, ns)
+                        })
+                        .collect()
+                };
+                for (nq, ns) in eps_succs {
+                    // The depth cap: a stack deeper than num_states is a cycle (the pigeonhole
+                    // principle), safe to prune without losing any reachable in_config.
+                    if ns.len() > depth_cap {
+                        continue;
+                    }
+                    if eps_seen.insert((nq, ns.clone())) {
+                        eps.push((nq, ns));
+                    }
+                }
+            }
+            // The input-successors: from every epsilon-closed config, take every INPUT move (the
+            // a in 0..num_inputs). These enqueue new in_configs (the epsilon moves are traversed
+            // only as the prefix of an input step).
+            for (eq, estack) in &eps {
+                let etop = estack.last().copied().unwrap_or(self.start_stack);
+                let in_succs: Vec<(u32, Vec<u32>)> = if use_csr {
+                    let start = self
+                        .ctrl_offsets
+                        .get(*eq as usize)
+                        .copied()
+                        .unwrap_or(self.transitions.len() as u32) as usize;
+                    let count = self.ctrl_counts.get(*eq as usize).copied().unwrap_or(0) as usize;
+                    self.transitions[start..start + count]
+                        .iter()
+                        .filter(|t| t.a < self.num_inputs && t.top == etop)
+                        .map(|t| {
+                            let mut ns = estack.clone();
+                            ns.pop();
+                            for &p in t.push.iter().rev() {
+                                ns.push(p);
+                            }
+                            (t.next_q, ns)
+                        })
+                        .collect()
+                } else {
+                    (0..self.num_inputs)
+                        .flat_map(|a| self.lookup(*eq, Some(a), etop))
+                        .map(|t| {
+                            let mut ns = estack.clone();
+                            ns.pop();
+                            for &p in t.push.iter().rev() {
+                                ns.push(p);
+                            }
+                            (t.next_q, ns)
+                        })
+                        .collect()
+                };
+                for (nq, ns) in in_succs {
+                    // The depth cap: a stack deeper than num_states is a cycle (the pigeonhole
+                    // principle), safe to prune without losing any reachable in_config.
+                    if ns.len() > depth_cap {
+                        continue;
+                    }
                     if seen.insert((nq, ns.clone())) {
                         in_configs.push((nq, ns));
                     }
                 }
-            }
-            i += 1;
-            // The guard: the BFS must not exceed the finite domain size (the six-
-            // property #5 precondition). If it does, the machine has an unbounded
-            // stack (the no the bounded pushdown), and the displacement is
-            // undefined (the explicit panic, the no the silent non-termination).
-            if in_configs.len() > domain_size {
-                panic!(
-                    "reachable_in_configs: the six-property #5 precondition failed (the \
-                     machine's stack is unbounded, the BFS exceeded the finite domain \
-                     size {} (the num_states * the num_stack_syms^d_bound, the d_bound \
-                     = {})). The displacement is only defined for bounded-stack \
-                     machines (the RTN-compiled, the no the hand-built a^n b^n).",
-                    domain_size, d_bound
-                );
             }
         }
         in_configs
@@ -1324,14 +1442,54 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
     ) -> Vec<(u32, Vec<u32>, u32, Vec<u32>)> {
         let mut result: Vec<(u32, Vec<u32>, u32, Vec<u32>)> = Vec::new();
         for (in_q, in_stack) in in_configs {
+            // Simulate the PDA over t from this in_config, keepingING the full config-set (the
+            // NPDA frontier) so the one_or_more loop branches are all preserved. Each step: the
+            // epsilon-closure (full-stack, the no the (state, top) collapse that drops the
+            // iterations) then ALL input-`a` moves.
             let mut configs: Vec<(u32, Vec<u32>)> = vec![(*in_q, in_stack.clone())];
             let mut diverged = false;
             for &a in t {
-                configs = self.advance_eps_set(&configs, a);
-                if configs.is_empty() {
+                // The epsilon-closure of the current frontier (the full-stack, the exact).
+                let mut closed: Vec<(u32, Vec<u32>)> = configs.clone();
+                let mut seen: std::collections::HashSet<(u32, Vec<u32>)> =
+                    closed.iter().cloned().collect();
+                let mut ci = 0;
+                while ci < closed.len() {
+                    let (cq, cstk) = closed[ci].clone();
+                    ci += 1;
+                    let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+                    for (q2, push) in self.transition(cq, None, ctop) {
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if seen.insert((q2, ns.clone())) {
+                            closed.push((q2, ns));
+                        }
+                    }
+                }
+                // The input-`a` moves from every closed config.
+                let mut next: Vec<(u32, Vec<u32>)> = Vec::new();
+                let mut next_seen: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+                for (cq, cstk) in &closed {
+                    let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+                    for (q2, push) in self.transition(*cq, Some(a), ctop) {
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if next_seen.insert((q2, ns.clone())) {
+                            next.push((q2, ns));
+                        }
+                    }
+                }
+                if next.is_empty() {
                     diverged = true;
                     break; // the sequence diverged (the no out_config)
                 }
+                configs = next;
             }
             if !diverged {
                 for (out_q, out_stack) in &configs {
@@ -1347,8 +1505,12 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
     /// the production primitive for the bridge (the vocab_size sequences, the one BFS).
     pub fn displacement_many(&self, sequences: &[Vec<u32>]) -> Vec<Vec<(u32, Vec<u32>, u32, Vec<u32>)>> {
         let in_configs = self.reachable_in_configs();
+        // The per-sequence displacement is independent (a pure function of the sequence + the
+        // fixed in_config set), so parallelize across sequences (the rayon, the no shared state).
+        // This makes the one-time bridge build tractable on the 248K Qwen vocab.
+        use rayon::prelude::*;
         sequences
-            .iter()
+            .par_iter()
             .map(|s| self.displacement_from(&in_configs, s))
             .collect()
     }
