@@ -528,7 +528,17 @@ impl PdaMachine {
     ///   stack by one return-address per iteration, the no bound tighter than the control states).
     pub fn closure_depth_bound(&self) -> usize {
         match self.classify() {
-            PdaKind::VisiblyPushdown => self.max_stack_depth(),
+            PdaKind::VisiblyPushdown => {
+                // The VPA with a growth cycle (the the star-loop, the the one_or_more re-entry)
+                // needs the full depth (the num_states, the the pigeonhole) to preserve the loop
+                // back-edge. The VPA without a growth cycle (the the bounded nesting, the the JSON
+                // star-loop) the tight max_stack_depth (the the nesting depth).
+                if self.has_epsilon_growth_cycle() {
+                    self.num_states as usize
+                } else {
+                    self.max_stack_depth()
+                }
+            }
             PdaKind::Deterministic => {
                 if self.has_epsilon_growth_cycle() {
                     self.num_states as usize
