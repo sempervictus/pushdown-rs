@@ -103,6 +103,31 @@ impl PartialEq for PdaMachine {
 }
 impl Eq for PdaMachine {}
 
+/// The PDA kind, determined programmatically from the machine's structure. This is the
+/// dispatch key: the caller inspects the kind and uses the tight algorithm + bound for it,
+/// instead of the loose general-NPDA path for every machine.
+///
+/// The kinds (the the trait hierarchy in pda.rs, the the programmatic determination):
+/// - `Deterministic`: no `(q, a, top)` has two transitions (the DPDA, the single path). The
+///   epsilon closure is a single path (the no the frontier BFS). The tight depth bound is
+///   `max_stack_depth` when the machine has no self-recursive epsilon growth cycle (the
+///   bounded-nesting case), else `num_states` (the star-loop case).
+/// - `VisiblyPushdown`: every input-consuming move's stack-op class (the call / the return /
+///   the internal) is a function of the INPUT SYMBOL alone (the no the state). This is the
+///   VPL case (the JSON well-nested, the the xml, the the eBPF call/return). The stack depth
+///   is bounded by the nesting depth (the max_stack_depth, the tight). The mask is O(1) (the
+///   settled gate, the no the closure BFS, because the VPA has no epsilon moves that change
+///   the stack top in a state-dependent way).
+/// - `NonDeterministic`: the general NPDA (the choices, the one_or_more loops, the ambiguous
+///   grammars). The frontier BFS is required (the advance_eps_set, the full-stack dedup). The
+///   depth bound is `num_states` (the pigeonhole, the the star-loop re-entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdaKind {
+    Deterministic,
+    VisiblyPushdown,
+    NonDeterministic,
+}
+
 impl PdaMachine {
     /// Compute the SoA flat arrays (the flat_a, the flat_top, the flat_next_q)
     /// from the transitions (the SIMD-gatherable layout). This is a static
@@ -307,55 +332,93 @@ impl PdaMachine {
         // cycle_dpda tests rely on the empty stack matching the bottom-marker
         // transitions.
         let start_top = stk.last().copied().unwrap_or(self.start_stack);
-        // The epsilon closure is over (state, stack-top) pairs: an epsilon move
-        // delta(q, eps, top) -> (q', push) inspects only the stack TOP, so the
-        // reachable config space is bounded by num_states * num_stack_syms. We
-        // dedup on (state, top) so the BFS terminates exactly when no new pair
-        // is reachable (the full closure, the no synthetic cap).
+        // The epsilon closure, dispatched on the growth cycle (the consistent with the mask_at_cfg).
+        // the full-stack (state, Vec) dedup when the machine has an epsilon growth cycle (the
+        // star-loop re-entry, the the (state, top) dedup prematurely terminates the BFS), else
+        // the (state, top) dedup (the VPA / the bounded case, the GreatGramma Prop 3.5 sound).
+        let full_stack = self.has_epsilon_growth_cycle();
+        let depth_bound = self.closure_depth_bound();
         let mut configs: Vec<(u32, Vec<u32>)> = vec![(q, stk.to_vec())];
-        let mut seen: HashSet<(u32, u32)> = HashSet::new();
-        seen.insert((q, start_top));
         let mut i = 0;
-        while i < configs.len() {
-            let (cq, cstk) = configs[i].clone();
-            i += 1;
-            // The ctop is the top of the stack (the the empty stack coerced to the
-            // start_stack, the PDA invariant).
-            let ctop = cstk.last().copied().unwrap_or(self.start_stack);
-            if use_csr {
-                // CSR-based epsilon lookup: scan only cq's transitions (O(1-3)).
-                let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32);
-                let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0);
-                for j in 0..count {
-                    let t = &self.transitions[start as usize + j as usize];
-                    if t.a != self.num_inputs || t.top != ctop {
-                        continue;
+        if full_stack {
+            let mut seen: HashSet<(u32, Vec<u32>)> = HashSet::new();
+            seen.insert((q, stk.to_vec()));
+            while i < configs.len() {
+                let (cq, cstk) = configs[i].clone();
+                i += 1;
+                if cstk.len() > depth_bound {
+                    continue;
+                }
+                let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+                if use_csr {
+                    let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32);
+                    let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0);
+                    for j in 0..count {
+                        let t = &self.transitions[start as usize + j as usize];
+                        if t.a != self.num_inputs || t.top != ctop {
+                            continue;
+                        }
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in t.push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if seen.insert((t.next_q, ns.clone())) {
+                            configs.push((t.next_q, ns));
+                        }
                     }
-                    let mut ns = cstk.clone();
-                    ns.pop();
-                    for &p in t.push.iter().rev() {
-                        ns.push(p);
-                    }
-                    // The ns_top is the top of the new stack (the the empty new stack
-                    // is coerced to the start_stack, the PDA invariant). The dedup on
-                    // (state, top) uses the coerced top (the no the Option, the no the
-                    // sentinel).
-                    let ns_top = ns.last().copied().unwrap_or(self.start_stack);
-                    if seen.insert((t.next_q, ns_top)) {
-                        configs.push((t.next_q, ns));
+                } else {
+                    for (q2, push) in self.transition(cq, None, ctop) {
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if seen.insert((q2, ns.clone())) {
+                            configs.push((q2, ns));
+                        }
                     }
                 }
-            } else {
-                // Fallback: linear scan (the original path, for machines without CSR).
-                for (q2, push) in self.transition(cq, None, ctop) {
-                    let mut ns = cstk.clone();
-                    ns.pop();
-                    for &p in push.iter().rev() {
-                        ns.push(p);
+            }
+        } else {
+            let mut seen: HashSet<(u32, u32)> = HashSet::new();
+            seen.insert((q, start_top));
+            while i < configs.len() {
+                let (cq, cstk) = configs[i].clone();
+                i += 1;
+                if cstk.len() > depth_bound {
+                    continue;
+                }
+                let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+                if use_csr {
+                    let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32);
+                    let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0);
+                    for j in 0..count {
+                        let t = &self.transitions[start as usize + j as usize];
+                        if t.a != self.num_inputs || t.top != ctop {
+                            continue;
+                        }
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in t.push.iter().rev() {
+                            ns.push(p);
+                        }
+                        let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                        if seen.insert((t.next_q, ns_top)) {
+                            configs.push((t.next_q, ns));
+                        }
                     }
-                    let ns_top = ns.last().copied().unwrap_or(self.start_stack);
-                    if seen.insert((q2, ns_top)) {
-                        configs.push((q2, ns));
+                } else {
+                    for (q2, push) in self.transition(cq, None, ctop) {
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in push.iter().rev() {
+                            ns.push(p);
+                        }
+                        let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                        if seen.insert((q2, ns_top)) {
+                            configs.push((q2, ns));
+                        }
                     }
                 }
             }
@@ -400,6 +463,186 @@ impl PdaMachine {
     /// terminates the full-stack epsilon-closure BFS (the no a synthetic cap).
     pub fn max_stack_depth(&self) -> usize {
         self.transitions.iter().map(|t| t.push.len()).max().unwrap_or(1)
+    }
+
+    /// Determine the PDA kind from the machine's structure (the programmatic dispatch key).
+    /// The order of checks (the most specific first,
+    /// 1. VisiblyPushdown: the stack-op class is a function of the input symbol alone.
+    /// 2. Deterministic: no (q, a, top) has two transitions.
+    /// 3. NonDeterministic: the general case (the fallback).
+    pub fn classify(&self) -> PdaKind {
+        if self.is_visibly_pushdown() {
+            return PdaKind::VisiblyPushdown;
+        }
+        if self.is_deterministic() {
+            return PdaKind::Deterministic;
+        }
+        PdaKind::NonDeterministic
+    }
+
+    /// The VPA property: every input-consuming move's stack-op class (the call / the return /
+    /// the internal) is determined by the INPUT SYMBOL `a` alone (the no the control state `q`).
+    /// Concretely: for each input `a`, all transitions consuming `a` have the SAME push-length
+    /// class (the call = push.len() >= 2, the return = push.len() == 0, the internal =
+    /// push.len() == 1). If any input `a` is consumed with two different push-length classes
+    /// (the state-dependent stack op), the machine is NOT visibly-pushdown.
+    ///
+    /// This is the property that makes the JSON / the XML / the eBPF grammars VPLs (the the
+    /// well-nested, the the stack depth = the nesting depth, the bounded). The VPA's mask is O(1)
+    /// (the settled gate, the no the closure BFS) because the stack top is fully determined by the
+    /// input history (the the call/return matching, the no the state-dependent branching).
+    fn is_visibly_pushdown(&self) -> bool {
+        // The push-length class per input symbol: the call (>= 2), the return (== 0), the internal
+        // (== 1). For the VPA,, each input `a` must have a SINGLE class across all states.
+        let mut class_per_input: std::collections::HashMap<u32, u8> = std::collections::HashMap::new();
+        for t in &self.transitions {
+            if t.a == self.num_inputs {
+                continue; // the epsilon move (the no input, the VPA class is over the input symbols)
+            }
+            let class: u8 = if t.push.len() >= 2 {
+                0 // the call
+            } else if t.push.is_empty() {
+                1 // the return
+            } else {
+                2 // the internal (the push.len() == 1)
+            };
+            match class_per_input.get(&t.a) {
+                Some(&prev) if prev != class => return false, // the state-dependent stack op (the no VPA)
+                _ => {
+                    class_per_input.insert(t.a, class);
+                }
+            }
+        }
+        true
+    }
+
+    /// The tight epsilon-closure depth bound for the machine's kind (the the dispatch). This is
+    /// what terminates the full-stack BFS (the `mask_at_cfg` / the `advance_eps_set`) without a
+    /// synthetic cap, AND without the loose `num_states` bound when the machine is actually
+    /// bounded (the VPA / the deterministic no-growth-cycle case).
+    ///
+    /// - `VisiblyPushdown`: `max_stack_depth` (the nesting depth, the bounded, the tight).
+    /// - `Deterministic`: `max_stack_depth` when there is no self-recursive epsilon growth cycle
+    ///   (the bounded case), else `num_states` (the star-loop case, the pigeonhole).
+    /// - `NonDeterministic`: `num_states` (the pigeonhole, the the star-loop re-entry grows the
+    ///   stack by one return-address per iteration, the no bound tighter than the control states).
+    pub fn closure_depth_bound(&self) -> usize {
+        match self.classify() {
+            PdaKind::VisiblyPushdown => self.max_stack_depth(),
+            PdaKind::Deterministic => {
+                if self.has_epsilon_growth_cycle() {
+                    self.num_states as usize
+                } else {
+                    self.max_stack_depth()
+                }
+            }
+            PdaKind::NonDeterministic => self.num_states as usize,
+        }
+    }
+
+    /// Whether the machine's epsilon graph has a cycle with net stack growth (the star-loop
+    /// re-entry: a state that pushes a return address and can reach itself, growing the stack by
+    /// one per iteration). This is the six-property #5 unbounded case (the one_or_more loop). For
+    /// a visibly-pushdown machine (the JSON well-nested, the no unbounded star), this is false
+    /// (the stack is bounded by the nesting depth, the max production length).
+    ///
+    /// The detection: the epsilon graph (the states = nodes nodes, the epsilon moves = the edges)
+    /// has a growth cycle iff it has an SCC of size > 1 (the cycle the self-loop) that contains a
+    /// growth edge (the push.len() >= 2, the call that pushes a return address). For the RTN
+    /// star-loop, the call/return re-entry forms such an SCC. For the bounded-nPA, the epsilon
+    /// graph is acyclic (the the dot moves are input-driven, the no the epsilon cycles).
+    pub fn has_epsilon_growth_cycle(&self) -> bool {
+        let n = self.num_states as usize;
+        // The epsilon adjacency (the state -> the successor states via the epsilon moves).
+        let mut adj: Vec<Vec<u32>> = vec![Vec::new(); n];
+        // The growth edges (the epsilon moves that push >= 2 symbols, the the call).
+        let mut growth: Vec<(u32, u32)> = Vec::new();
+        for t in &self.transitions {
+            if t.a == self.num_inputs {
+                if (t.q as usize) < n && (t.next_q as usize) < n {
+                    adj[t.q as usize].push(t.next_q);
+                    if t.push.len() >= 2 {
+                        growth.push((t.q, t.next_q));
+                    }
+                }
+            }
+        }
+        // The SCCar SCC (the Tarjan). A growth cycle exists iff some SCC of size > 1 contains a
+        // growth edge (the the call that re-enters the same strongly-connected component).
+        let mut index = vec![usize::MAX; n];
+        let mut lowlink = vec![0usize; n];
+        let mut on_stack = vec![false; n];
+        let mut stack: Vec<u32> = Vec::new();
+        let mut counter = 0usize;
+        let mut scc_has_growth = vec![false; n]; // the per-SCC flag (the the SCC id -> the growth edge
+        let mut scc_count = 0usize;
+
+        fn strongconnect(
+            v: u32,
+            adj: &Vec<Vec<u32>>,
+            growth: &Vec<(u32, u32)>,
+            index: &mut Vec<usize>,
+            lowlink: &mut Vec<usize>,
+            on_stack: &mut Vec<bool>,
+            stack: &mut Vec<u32>,
+            counter: &mut usize,
+            scc_has_growth: &mut Vec<bool>,
+            scc_count: &mut usize,
+        ) {
+            let _n = adj.len();
+            index[v as usize] = *counter;
+            lowlink[v as usize] = *counter;
+            *counter += 1;
+            stack.push(v);
+            on_stack[v as usize] = true;
+            for &w in &adj[v as usize] {
+                if index[w as usize] == usize::MAX {
+                    strongconnect(
+                        w, adj, growth, index, lowlink, on_stack, stack, counter, scc_has_growth, scc_count,
+                    );
+                    lowlink[v as usize] = lowlink[v as usize].min(lowlink[w as usize]);
+                } else if on_stack[w as usize] {
+                    lowlink[v as usize] = lowlink[v as usize].min(index[w as usize]);
+                }
+            }
+            if lowlink[v as usize] == index[v as usize] {
+                // The SCCar SCC. Pop it.
+                let mut scc_size = 0usize;
+                let mut scc_nodes: Vec<u32> = Vec::new();
+                loop {
+                    let w = stack.pop().unwrap();
+                    on_stack[w as usize] = false;
+                    scc_size += 1;
+                    scc_nodes.push(w);
+                    if w == v {
+                        break;
+                    }
+                }
+                // The growth cycle: the SCC has > 1 state AND contains a growth edge (the the that
+                // re-enters the SCC). For the RTN star-loop, the call/return re-entry forms an SCC
+                // of size > 1 with a growth edge.
+                if scc_size > 1 {
+                    let node_set: std::collections::HashSet<u32> = scc_nodes.into_iter().collect();
+                    for &(gq, gw) in growth {
+                        if node_set.contains(&gq) && node_set.contains(&gw) {
+                            scc_has_growth[*scc_count] = true;
+                            break;
+                        }
+                    }
+                }
+                *scc_count += 1;
+            }
+        }
+
+        for v in 0..n as u32 {
+            if index[v as usize] == usize::MAX {
+                strongconnect(
+                    v, &adj, &growth, &mut index, &mut lowlink, &mut on_stack, &mut stack,
+                    &mut counter, &mut scc_has_growth, &mut scc_count,
+                );
+            }
+        }
+        scc_has_growth.iter().any(|&g| g)
     }
 
     /// The NPDA epsilon-closure advance (the ALL next-configs, the no the single-config
@@ -940,54 +1183,125 @@ impl PdaMachine {
     /// `proof_mask_batch_consistent_with_advance_eps`). `mask_batch` is the
     /// batched form of this same computation.
 pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
-        // The epsilon closure over the (state, top) pairs (the dedup on (state,
-        // top), the no the full stack). This is SOUND by the GreatGramma Prop 3.5
-        // (the stack invariance): the mask at a config depends only on (state,
-        // top), not the deeper stack. So configs sharing (state, top) have the
-        // same mask, so deduping on (state, top) drops no mask information. The
-        // closure terminates when no new (state, top) pair is reachable (the
-        // finite domain, the num_states * num_stack_syms, the no the synthetic cap).
+        // The epsilon-closure mask, dispatched on the machine's PDA kind (the classify, the
+        // programmatic determination). The kind selects the tight dedup + depth bound:
+        //
+        // - `VisiblyPushdown` / `Deterministic` (the no growth cycle): the stack-op is a function
+        //   of the input (the VPA) or the path is unique (the DPDA), so the (state, top) dedup is
+        //   SOUND (the GreatGramma Prop 3.5 stack invariance: the mask depends only on (state, top),
+        //   not the deeper stack). The depth bound is the tight max_stack_depth (the nesting depth).
+        //   This is the O(_states x num_stack_syms) bounded closure (the no the exponential).
+        //
+        // - `NonDeterministic` (the star-loop, the one_or_more re-entry): the (state, top) dedup
+        //   prematurely terminates the BFS (the cycle keeps the top constant while the stack grows,
+        //   so the terminal states reachable only at a deeper stack are missed). The full-stack
+        //   (state, Vec) dedup is required (the lossless: two configs with the same state but
+        //   different stacks have different futures). The depth bound is num_states (the pigeonhole,
+        //   the star-loop re-entry grows the stack by one return-address per iteration).
+        // The kind dispatch (the programmatic determination, the the classify).
+        // The full-stack dedup is required when the machine has an epsilon growth cycle (the
+        // star-loop re-entry: the cycle keeps the top constant while the stack grows, so the
+        // (state, top) dedup prematurely terminates the BFS before misses the terminal states that
+        // are only reachable at a deeper stack). This is true for the NonDeterministic kind AND
+        // for the Deterministic kind with a growth cycle (the the star-loop that is still
+        // deterministic, the the single-path but the stack-growing re-entry). The (state, top)
+        // dedup is sound only when there is NO growth cycle (the VPA / the bounded-nesting / the
+        // acyclic-epsilon case, the GreatGramma Prop 3.5 invariance).
+        let full_stack = self.has_epsilon_growth_cycle();
+        let depth_bound = self.closure_depth_bound();
         let mut closed: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
-        let mut seen: HashSet<(u32, u32)> = HashSet::new();
-        seen.insert((q, stack.last().copied().unwrap_or(self.start_stack)));
-        let mut i = 0;
         let use_csr = !self.ctrl_offsets.is_empty();
-        while i < closed.len() {
-            let (cq, cstk) = closed[i].clone();
-            i += 1;
-            let ctop = cstk.last().copied().unwrap_or(self.start_stack);
-            if use_csr {
-                let start = self
-                    .ctrl_offsets
-                    .get(cq as usize)
-                    .copied()
-                    .unwrap_or(self.transitions.len() as u32) as usize;
-                let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
-                for j in 0..count {
-                    let t = &self.transitions[start + j];
-                    if t.a != self.num_inputs || t.top != ctop {
-                        continue;
+        if full_stack {
+            // The full-stack dedup (the NPDA frontier, the lossless).
+            let mut seen: HashSet<(u32, Vec<u32>)> = HashSet::new();
+            seen.insert((q, stack.to_vec()));
+            let mut i = 0;
+            while i < closed.len() {
+                let (cq, cstk) = closed[i].clone();
+                i += 1;
+                if cstk.len() > depth_bound {
+                    continue; // beyond the machine's reachable depth (the pigeonhole bound)
+                }
+                let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+                if use_csr {
+                    let start = self
+                        .ctrl_offsets
+                        .get(cq as usize)
+                        .copied()
+                        .unwrap_or(self.transitions.len() as u32) as usize;
+                    let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                    for j in 0..count {
+                        let t = &self.transitions[start + j];
+                        if t.a != self.num_inputs || t.top != ctop {
+                            continue;
+                        }
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in t.push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if seen.insert((t.next_q, ns.clone())) {
+                            closed.push((t.next_q, ns));
+                        }
                     }
-                    let mut ns = cstk.clone();
-                    ns.pop();
-                    for &p in t.push.iter().rev() {
-                        ns.push(p);
-                    }
-                    let ns_top = ns.last().copied().unwrap_or(self.start_stack);
-                    if seen.insert((t.next_q, ns_top)) {
-                        closed.push((t.next_q, ns));
+                } else {
+                    for (q2, push) in self.transition(cq, None, ctop) {
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if seen.insert((q2, ns.clone())) {
+                            closed.push((q2, ns));
+                        }
                     }
                 }
-            } else {
-                for (q2, push) in self.transition(cq, None, ctop) {
-                    let mut ns = cstk.clone();
-                    ns.pop();
-                    for &p in push.iter().rev() {
-                        ns.push(p);
+            }
+        } else {
+            // The (state, top) dedup (the VPA / the DPDA, the GreatGramma Prop 3.5 sound).
+            let mut seen: HashSet<(u32, u32)> = HashSet::new();
+            seen.insert((q, stack.last().copied().unwrap_or(self.start_stack)));
+            let mut i = 0;
+            while i < closed.len() {
+                let (cq, cstk) = closed[i].clone();
+                i += 1;
+                if cstk.len() > depth_bound {
+                    continue;
+                }
+                let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+                if use_csr {
+                    let start = self
+                        .ctrl_offsets
+                        .get(cq as usize)
+                        .copied()
+                        .unwrap_or(self.transitions.len() as u32) as usize;
+                    let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                    for j in 0..count {
+                        let t = &self.transitions[start + j];
+                        if t.a != self.num_inputs || t.top != ctop {
+                            continue;
+                        }
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in t.push.iter().rev() {
+                            ns.push(p);
+                        }
+                        let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                        if seen.insert((t.next_q, ns_top)) {
+                            closed.push((t.next_q, ns));
+                        }
                     }
-                    let ns_top = ns.last().copied().unwrap_or(self.start_stack);
-                    if seen.insert((q2, ns_top)) {
-                        closed.push((q2, ns));
+                } else {
+                    for (q2, push) in self.transition(cq, None, ctop) {
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in push.iter().rev() {
+                            ns.push(p);
+                        }
+                        let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                        if seen.insert((q2, ns_top)) {
+                            closed.push((q2, ns));
+                        }
                     }
                 }
             }

@@ -2185,26 +2185,55 @@ fn proof_mask_settled_csr_equals_linear() {
 // independent `lookup` + the Pda-trait `transition`, NOT the CSR).
 fn mask_at_cfg_linear_reference(m: &PdaMachine, q: u32, stack: &[u32]) -> Vec<u32> {
     use pushdown_rs::pda::Pda;
-    // The full-stack epsilon closure (the consistent with the mask_at_cfg, the no the single-top
-    // approximation that desyncs on the empty-push epsilon moves). The linear-scan lookup (the
-    // no the CSR) is the independent reference.
+    // The independent linear-scan reference. The dedup must match the mask_at_cfg dispatch:
+    // the full-stack (state, Vec) dedup when the machine has an epsilon growth cycle (the
+    // star-loop, the the (state, top) dedup prematurely terminates the BFS), else the
+    // (state, top) dedup (the VPA / the bounded case, the GreatGramma Prop 3.5 sound).
+    let full_stack = m.has_epsilon_growth_cycle();
+    let depth_bound = m.closure_depth_bound();
     let mut closed: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
-    let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
-    seen.insert((q, stack.last().copied().unwrap_or(m.start_stack)));
     let mut i = 0;
-    while i < closed.len() {
-        let (cq, cstk) = closed[i].clone();
-        i += 1;
-        let ctop = cstk.last().copied().unwrap_or(m.start_stack);
-        for (q2, push) in m.transition(cq, None, ctop) {
-            let mut ns = cstk.clone();
-            ns.pop();
-            for &p in push.iter().rev() {
-                ns.push(p);
+    if full_stack {
+        let mut seen: std::collections::HashSet<(u32, Vec<u32>)> = std::collections::HashSet::new();
+        seen.insert((q, stack.to_vec()));
+        while i < closed.len() {
+            let (cq, cstk) = closed[i].clone();
+            i += 1;
+            if cstk.len() > depth_bound {
+                continue;
             }
-            let ns_top = ns.last().copied().unwrap_or(m.start_stack);
-            if seen.insert((q2, ns_top)) {
-                closed.push((q2, ns));
+            let ctop = cstk.last().copied().unwrap_or(m.start_stack);
+            for (q2, push) in m.transition(cq, None, ctop) {
+                let mut ns = cstk.clone();
+                ns.pop();
+                for &p in push.iter().rev() {
+                    ns.push(p);
+                }
+                if seen.insert((q2, ns.clone())) {
+                    closed.push((q2, ns));
+                }
+            }
+        }
+    } else {
+        let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        seen.insert((q, stack.last().copied().unwrap_or(m.start_stack)));
+        while i < closed.len() {
+            let (cq, cstk) = closed[i].clone();
+            i += 1;
+            if cstk.len() > depth_bound {
+                continue;
+            }
+            let ctop = cstk.last().copied().unwrap_or(m.start_stack);
+            for (q2, push) in m.transition(cq, None, ctop) {
+                let mut ns = cstk.clone();
+                ns.pop();
+                for &p in push.iter().rev() {
+                    ns.push(p);
+                }
+                let ns_top = ns.last().copied().unwrap_or(m.start_stack);
+                if seen.insert((q2, ns_top)) {
+                    closed.push((q2, ns));
+                }
             }
         }
     }
