@@ -1253,20 +1253,18 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
         //   different stacks have different futures). The depth bound is num_states (the pigeonhole,
         //   the star-loop re-entry grows the stack by one return-address per iteration).
         // The kind dispatch (the programmatic determination, the the classify).
-        // The mask_at_cfg dispatches on the PDA KIND (the the classify, the the programmatic
-        // determination), NOT on the growth cycle alone. The VPA (the the well-nested, the the
-        // JSON) uses the (state, top) dedup (the the GreatGramma Prop 3.5 invariance, the the
-        // sound + the cheap, the the O(num_states x num_stack_syms) bounded closure). The general
-        // NPDA (the the non-VPA star-loop, the the ambiguous grammar) uses the full-stack dedup
-        // (the the lossless, the the no the (state, top) collapse that drops the loop branch).
-        //
-        // The growth cycle (the the has_epsilon_growth_cycle) is the DISTINGUISHING property for
-        // the advance_eps_set (the the frontier, the the loop preservation), NOT for the mask_at_cfg
-        // (the the mask, the the bounded). The VPA mask is the bounded (the the (state, top) dedup,
-        // the the tight); even when the VPA has a growth cycle (the the star-loop, the the advance_eps_set
-        // needs the full depth, but the mask_at not).
+        // The mask_at_cfg dispatches on the PDA KIND + the GROWTH CYCLE (the the classify, the
+        // the program_epsilon_growth_cycle). The full-stack dedup is required when the machine has an
+        // epsilon growth cycle (the the star-loop re-entry: the cycle keeps the top constant while
+        // the stack grows, so the (state, top) dedup prematurely terminates the BFS before
+        // reaching the terminal states that are only reachable at a deeper stack). This is true
+        // for the NonDeterministic kind (the the general NPDA) AND for the VisiblyPushdown / the
+        // Deterministic kind WITH a growth cycle (the the star-loop, the the JSON, the the
+        // tool-call envelope). The (state, top) dedup is sound only when there is NO growth cycle
+        // (the the bounded nesting, the the acyclic-epsilon case, the GreatGramma Prop 3.5).
         let kind = self.classify();
-        let full_stack = matches!(kind, PdaKind::NonDeterministic);
+        let full_stack = matches!(kind, PdaKind::NonDeterministic)
+            || self.has_epsilon_growth_cycle();
         // The mask_at_cfg uses the closure_depth_bound (the the dispatch-aware bound): the VPA /
         // the Deterministic WITH a growth cycle (the the star-loop, the the Qwen tool-call) needs
         // the FULL depth (the num_states, the the loop state is at depth > the max_stack_depth,
