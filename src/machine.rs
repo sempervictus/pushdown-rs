@@ -1260,14 +1260,14 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
         let kind = self.classify();
         let full_stack = matches!(kind, PdaKind::NonDeterministic)
             || self.has_epsilon_growth_cycle();
-        // The mask_at_cfg uses the closure_depth_bound (the the dispatch-aware bound): the VPA /
-        // the Deterministic WITH a growth cycle (the the star-loop, the the Qwen tool-call) needs
-        // the FULL depth (the num_states, the the loop state is at depth > the max_stack_depth,
-        // the the tight bound truncates the mask). The VPA / the Deterministic WITHOUT a growth
-        // cycle (the the bounded nesting, the the no star-loop) the tight max_stack_depth (the
-        // the O(1-3) mask). The (state, top) dedup is sound for the VPA (the the GreatGramma Prop
-        // 3.5 invariance), so the full_stack is only for the general NPDA (the the no-VPA).
-        let depth_bound = self.closure_depth_bound();
+        // The mask_at_cfg uses the TIGHT depth bound (the the current stack depth + the max_stack_depth),
+        // NOT the loose closure_depth_bound (the the num_states, the the O(n³) performance issue).
+        // The current config's stack depth is the actual reachable depth; the closure only needs
+        // to explore up to the current depth + the max single push (the the max_stack_depth).
+        // This is much tighter than the num_states (the the pigeonhole), and avoids the O(n³)
+        // thrash on the large tool-call grammars (the the 100+ states).
+        let tight_bound = stack.len() + self.max_stack_depth();
+        let depth_bound = tight_bound.min(self.closure_depth_bound());
         let mut closed: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
         let use_csr = !self.ctrl_offsets.is_empty();
         if full_stack {
