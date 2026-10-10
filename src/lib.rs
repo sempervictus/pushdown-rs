@@ -63,7 +63,7 @@
 //! const EPS: u32 = 2;
 //! const Z: u32 = 0;
 //! const A_SYM: u32 = 1;
-//! let m = pushdown_rs::PdaMachine {
+//! let mut m = pushdown_rs::PdaMachine {
 //!     num_states: 4,
 //!     num_inputs: 2,
 //!     num_stack_syms: 2,
@@ -84,7 +84,9 @@
 //!     flat_a: vec![],
 //!     flat_top: vec![],
 //!     flat_next_q: vec![],
+//!     closure_table: Vec::new(), // the computed via the m.compute_closure_table() (the the owl prior art)
 //! };
+//! m.compute_closure_table();
 //! assert!(m.is_deterministic());
 //! assert!(m.accepts_dpda(&[A, B]));
 //! assert!(m.accepts_dpda(&[A, A, B, B]));

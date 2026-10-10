@@ -128,6 +128,7 @@ mod simd_accuracy {
     flat_a: vec![],
     flat_top: vec![],
     flat_next_q: vec![],
+        closure_table: Vec::new(),
         };
         let index = machine.build_index();
 

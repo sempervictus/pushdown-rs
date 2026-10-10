@@ -139,6 +139,7 @@ fn main() {
     flat_a: vec![],
     flat_top: vec![],
     flat_next_q: vec![],
+        closure_table: Vec::new(),
     };
     let dfa_names = vec!["start".to_string(), "seen_b".to_string(), "accept".to_string()];
     dump_debug(&m_dfa, "the hand-built DFA-embedded PDA (the (a|b)* a)", Some(&dfa_names));

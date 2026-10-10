@@ -81,6 +81,24 @@ pub struct PdaMachine {
     pub flat_a: Vec<u32>,
     pub flat_top: Vec<u32>,
     pub flat_next_q: Vec<u32>,
+    /// The precomputed epsilon-closure table (the owl owl `epsilon_closure_for_state`
+    /// pattern, the the automaton-epsilon-closure.c). For each (state, top) pair, the
+    /// set of (state, top) pairs reachable via epsilon moves. This is computed ONCE at
+    /// construction (the the automcompute_closure_table`), and looked up in O(1) per
+    /// `mask_at_cfg` call (the the no the per-call BFS). The owl prior art: the
+    /// `automaton_compute_epsilon_closure` precomputes the closure per state, and the
+    /// `follow_transition` step is O(1) (the the no the per-step closure recomputation).
+    ///
+    /// The table is keyed by (state, top) — the the `mask_at_cfg`'s input. The value is
+    /// the set of (state, top) pairs in the epsilon closure. For the VPA / the bounded
+    /// case, the closure is small (the the O(num_states x num_stack_syms) pairs). For the
+    /// star-loop case, the closure is larger (the the growth cycle), but still bounded by
+    /// the num_states x num_stack_syms domain.
+    ///
+    /// Derived data (the computed from the transitions), excluded from equality (the the
+    /// same as the CSR fields). Computed eagerly at construction (the the `new` + the
+    /// `compile` + the `from_bitvec`), looked up in O(1) per mask_at_cfg call.
+    pub closure_table: Vec<Vec<(u32, u32)>>,
 }
 
 // The CSR fields (ctrl_offsets, ctrl_counts) are derived data (computed from
@@ -162,6 +180,85 @@ impl PdaMachine {
         (offsets, counts)
     }
 
+    /// Compute the precomputed epsilon-closure table (the the owl
+    /// `automaton_compute_epsilon_closure` pattern, the the
+    /// automaton-epsilon-closure.c). For each (state, top) pair, the table stores
+    /// the set of (state, top) pairs reachable via epsilon moves. This is computed
+    /// ONCE at construction, and looked up in O(1) per `mask_at_cfg` call (the the
+    /// no the per-call BFS).
+    ///
+    /// The owl prior art: the `automaton_compute_epsilon_closure` precomputes the
+    /// closure per state (the the `epsilon_closure_for_state[i]`), and the
+    /// `follow_transition` step is O(1) (the the no the per-step closure
+    /// recomputation). My transcription: the closure is per (state, top) pair (the the
+    /// PDA's config space), and the `mask_at_cfg` looks up the closure in O(1).
+    ///
+    /// The closure is the least fixed point of the epsilon relation (the the
+    /// Bouajjani 1997 summar). It terminates when no new (state, top) pair is
+    /// reachable (the the finite domain, the num_states x num_stack_syms).
+    pub fn compute_closure_table(&mut self) {
+        let n_states = self.num_states as usize;
+        let n_tops = self.num_stack_syms as usize;
+        // The table is indexed by (state, top) -> the set of (state, top) pairs in the closure.
+        // The size is num_states x num_stack_syms (the the finite domain).
+        let mut table: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_states * n_tops];
+        for q in 0..n_states {
+            for top in 0..n_tops {
+                let idx = q * n_tops + top;
+                // The epsilon closure of (q, top): the BFS over the (state, top) pairs.
+                let mut closed: Vec<(u32, u32)> = vec![(q as u32, top as u32)];
+                let mut seen: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+                seen.insert((q as u32, top as u32));
+                let mut i = 0;
+                while i < closed.len() {
+                    let (cq, ctop) = closed[i];
+                    i += 1;
+                    // The epsilon moves from (cq, ctop) (the the a == num_inputs, the the top == ctop).
+                    if !self.ctrl_offsets.is_empty() {
+                        let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32) as usize;
+                        let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                        for j in 0..count {
+                            let t = &self.transitions[start + j];
+                            if t.a != self.num_inputs || t.top != ctop {
+                                continue;
+                            }
+                            // The new top (the the push replaces the top, the the new top is the push[0] or the ctop if the push is empty).
+                            let new_top = if t.push.is_empty() {
+                                ctop
+                            } else {
+                                *t.push.first().unwrap()
+                            };
+                            if seen.insert((t.next_q, new_top)) {
+                                closed.push((t.next_q, new_top));
+                            }
+                        }
+                    } else {
+                        for (q2, push) in self.transition(cq, None, ctop) {
+                            let new_top = if push.is_empty() {
+                                ctop
+                            } else {
+                                *push.first().unwrap()
+                            };
+                            if seen.insert((q2, new_top)) {
+                                closed.push((q2, new_top));
+                            }
+                        }
+                    }
+                }
+                table[idx] = closed;
+            }
+        }
+        self.closure_table = table;
+    }
+
+    /// The precomputed epsilon-closure lookup (the the O(1) replacement for the per-call BFS).
+    /// Returns the set of (state, top) pairs in the epsilon closure of (q, top).
+    pub fn closure_at(&self, q: u32, top: u32) -> &[(u32, u32)] {
+        let n_tops = self.num_stack_syms as usize;
+        let idx = (q as usize) * n_tops + (top as usize);
+        &self.closure_table[idx]
+    }
+
     /// Build a machine, validating the bounds.
     #[allow(clippy::too_many_arguments)] // the the 8-field constructor (the the POD, the the no builder)
     pub fn new(
@@ -199,7 +296,7 @@ impl PdaMachine {
             }
         }
         let (flat_a, flat_top, flat_next_q) = Self::compute_flat_arrays(&transitions);
-        let m = PdaMachine {
+        let mut m = PdaMachine {
             num_states,
             num_inputs,
             num_stack_syms,
@@ -214,8 +311,12 @@ impl PdaMachine {
             flat_a,
             flat_top,
             flat_next_q,
+            closure_table: Vec::new(), // the filled by the compute_closure_table below
         };
         m.validate_bounds()?;
+        // The precomputed epsilon-closure table (the the owl automaton_compute_epsilon_closure
+        // pattern). Computed once at construction, looked up in O(1) per mask_at_cfg call.
+        m.compute_closure_table();
         Ok(m)
     }
 
@@ -1195,79 +1296,63 @@ impl PdaMachine {
     /// `proof_mask_batch_consistent_with_advance_eps`). `mask_batch` is the
     /// batched form of this same computation.
 pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
-        // The VPA fast-path (the the algorithmic bypass, the no the iterative closure BFS):
-        // for a VisiblyPushdown machine, the stack behavior is a function of the input symbol
-        // (the call / the return / the internal, the the Madhusudan VPA property). At a SETTLED
-        // config (the no pending epsilon moves that change the stack top), the mask is EXACTLY the
-        // settled gate (the mask_at_cfg_settled, the O(1-3) CSR lookup), the no the closure BFS.
+        // The precomputed epsilon-closure lookup (the the owl automaton_compute_epsilon_closure
+        // pattern, the the O(1) replacement for the per-call BFS). The closure table is computed
+        // once at construction (the compute_closure_table), and looked up here in O(1).
         //
-        // The soundness: the VPA property guarantees that the stack top is fully determined by
-        // the input history (the the call/return matching), so two configs with the same (state, top)
-        // have the same future (the GreatGramma Prop 3.5 invariance). The settled mask (the the
-        // inputs with a defined transition at (q, a, top)) is therefore the exact mask (the no the
-        // closure needed). This is the JSON / the well-nested case (the the VPL), where the iterative
-        // BFS thrashes the CPU on every token.
+        // The owl prior art: the owl interpreter precomputes the epsilon closure per state
+        // (the epsilon_closure_for_state[i]), and the follow_transition step is O(1) (the the
+        // no the per-step closure recomputation). My transcription: the closure is per (state, top)
+        // pair (the the PDA's config space), and the mask_at_cfg looks up the closure in O(1).
         //
-        // The VPA is at a settled config when the current (state, top) has NO epsilon move that
-        // changes the top (the the call/return are input-driven, the no epsilon-driven). For the RTN-
-        // compiled VPA, the epsilon moves are the choice/call/return/exit (the the state-driven), so
-        // the settled check is: the mask_at_cfg_settled is non-empty OR the state has no epsilon
-        // successor that changes the top. The conservative case (the the state HAS an epsilon
-        // successor) falls through to the closure BFS (the the correct, the no the fast).
-        if self.classify() == PdaKind::VisiblyPushdown {
+        // The soundness: the closure table is the least fixed point of the epsilon relation (the
+        // the Bouajjani 1997 summarization), precomputed over the finite (state, top) domain
+        // (the num_states x num_stack_syms). The GreatGramma Prop 3.5 (the stack invariance)
+        // guarantees the (state, top) dedup is sound for the no-growth-cycle machines (the VPA /
+        // the bounded-nesting). For the growth-cycle machines (the the star-loop), the (state, top)
+        // dedup is NOT sound (the the cycle keeps the top constant while the stack grows, so the
+        // terminal states reachable only at a deeper stack are missed). The growth-cycle machines
+        // use the per-call full-stack BFS (the the no the precomputed table).
+        if !self.has_epsilon_growth_cycle() && !self.closure_table.is_empty() {
+            // The precomputed table (the the O(1) lookup, the the no-growth-cycle machines).
+            // The table is empty for the direct-construction sites (the the tests, the the
+            // examples) that don't call the compute_closure_table — fall back to the per-call BFS.
             let top = stack.last().copied().unwrap_or(self.start_stack);
-            // The settled mask (the the O(1-3) CSR lookup, the the inputs at the current (state, top)).
-            let settled = self.mask_at_cfg_settled(q, top);
-            // The VPA is at a settled config when the state has NO epsilon successor that changes
-            // the top (the the choice/call/return/exit are the input epsilon moves, the the VPA's
-            // stack is input-driven, the no epsilon-driven). If the state has an epsilon successor,
-            // the closure is needed (the the fall through to the BFS, the the correct).
-            let has_eps_succ = self.has_epsilon_successor(q, top);
-            if !has_eps_succ {
-                return settled; // the the O VPA config (the the O(1-3) mask, the no the BFS)
+            let closure = self.closure_at(q, top);
+            // Collect the allowed inputs over the closure (the the O(closure_width) scan, the the
+            // no the per-call BFS).
+            let mut allowed: HashSet<u32> = HashSet::new();
+            let use_csr = !self.ctrl_offsets.is_empty();
+            for &(cq, ctop) in closure {
+                if use_csr {
+                    let start = self
+                        .ctrl_offsets
+                        .get(cq as usize)
+                        .copied()
+                        .unwrap_or(self.transitions.len() as u32) as usize;
+                    let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                    for j in 0..count {
+                        let t = &self.transitions[start + j];
+                        if t.a < self.num_inputs && t.top == ctop {
+                            allowed.insert(t.a);
+                        }
+                    }
+                } else {
+                    for a in 0..self.num_inputs {
+                        if !self.lookup(cq, Some(a), ctop).is_empty() {
+                            allowed.insert(a);
+                        }
+                    }
+                }
             }
-            // The the VPA config with pending epsilon moves (the the choice state): the the call-dot):
-            // the closure is needed. But for the VPA, the epsilon closure is a SINGLE deterministic
-            // path (the no the branching, the the VPA property), so the (state, top) dedup is sound
-            // (the the GreatGramma Prop 3.5). Fall through to the (state, top) closure (the the cheap,
-            // the no the full-stack).
+            let mut result: Vec<u32> = allowed.into_iter().collect();
+            result.sort();
+            return result;
         }
-        // The epsilon-closure mask, dispatched on the machine's PDA kind (the classify, the
-        // programmatic determination). The kind selects the tight dedup + depth bound:
-        //
-        // - `VisiblyPushdown` / `Deterministic` (the no growth cycle): the stack-op is a function
-        //   of the input (the VPA) or the path is unique (the DPDA), so the (state, top) dedup is
-        //   SOUND (the GreatGramma Prop 3.5 stack invariance: the mask depends only on (state, top),
-        //   not the deeper stack). The depth bound is the tight max_stack_depth (the nesting depth).
-        //   This is the O(_states x num_stack_syms) bounded closure (the no the exponential).
-        //
-        // - `NonDeterministic` (the star-loop, the one_or_more re-entry): the (state, top) dedup
-        //   prematurely terminates the BFS (the cycle keeps the top constant while the stack grows,
-        //   so the terminal states reachable only at a deeper stack are missed). The full-stack
-        //   (state, Vec) dedup is required (the lossless: two configs with the same state but
-        //   different stacks have different futures). The depth bound is num_states (the pigeonhole,
-        //   the star-loop re-entry grows the stack by one return-address per iteration).
-        // The kind dispatch (the programmatic determination, the the classify).
-        // The mask_at_cfg dispatches on the PDA KIND + the GROWTH CYCLE (the the classify, the
-        // the program_epsilon_growth_cycle). The full-stack dedup is required when the machine has an
-        // epsilon growth cycle (the the star-loop re-entry: the cycle keeps the top constant while
-        // the stack grows, so the (state, top) dedup prematurely terminates the BFS before
-        // reaching the terminal states that are only reachable at a deeper stack). This is true
-        // for the NonDeterministic kind (the the general NPDA) AND for the VisiblyPushdown / the
-        // Deterministic kind WITH a growth cycle (the the star-loop, the the JSON, the the
-        // tool-call envelope). The (state, top) dedup is sound only when there is NO growth cycle
-        // (the the bounded nesting, the the acyclic-epsilon case, the GreatGramma Prop 3.5).
-        let kind = self.classify();
-        let full_stack = matches!(kind, PdaKind::NonDeterministic)
-            || self.has_epsilon_growth_cycle();
-        // The mask_at_cfg uses the TIGHT depth bound (the the current stack depth + the max_stack_depth),
-        // NOT the loose closure_depth_bound (the the num_states, the the O(n³) performance issue).
-        // The current config's stack depth is the actual reachable depth; the closure only needs
-        // to explore up to the current depth + the max single push (the the max_stack_depth).
-        // This is much tighter than the num_states (the the pigeonhole), and avoids the O(n³)
-        // thrash on the large tool-call grammars (the the 100+ states).
-        let tight_bound = stack.len() + self.max_stack_depth();
-        let depth_bound = tight_bound.min(self.closure_depth_bound());
+        // The growth-cycle machines (the the star-loop): the per-call full-stack BFS (the the
+        // no the precomputed table, the the (state, top) dedup is not sound for the growth cycle).
+        let full_stack = true;
+        let depth_bound = self.closure_depth_bound();
         let mut closed: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
         let use_csr = !self.ctrl_offsets.is_empty();
         if full_stack {
@@ -1311,54 +1396,6 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
                             ns.push(p);
                         }
                         if seen.insert((q2, ns.clone())) {
-                            closed.push((q2, ns));
-                        }
-                    }
-                }
-            }
-        } else {
-            // The (state, top) dedup (the VPA / the DPDA, the GreatGramma Prop 3.5 sound).
-            let mut seen: HashSet<(u32, u32)> = HashSet::new();
-            seen.insert((q, stack.last().copied().unwrap_or(self.start_stack)));
-            let mut i = 0;
-            while i < closed.len() {
-                let (cq, cstk) = closed[i].clone();
-                i += 1;
-                if cstk.len() > depth_bound {
-                    continue;
-                }
-                let ctop = cstk.last().copied().unwrap_or(self.start_stack);
-                if use_csr {
-                    let start = self
-                        .ctrl_offsets
-                        .get(cq as usize)
-                        .copied()
-                        .unwrap_or(self.transitions.len() as u32) as usize;
-                    let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
-                    for j in 0..count {
-                        let t = &self.transitions[start + j];
-                        if t.a != self.num_inputs || t.top != ctop {
-                            continue;
-                        }
-                        let mut ns = cstk.clone();
-                        ns.pop();
-                        for &p in t.push.iter().rev() {
-                            ns.push(p);
-                        }
-                        let ns_top = ns.last().copied().unwrap_or(self.start_stack);
-                        if seen.insert((t.next_q, ns_top)) {
-                            closed.push((t.next_q, ns));
-                        }
-                    }
-                } else {
-                    for (q2, push) in self.transition(cq, None, ctop) {
-                        let mut ns = cstk.clone();
-                        ns.pop();
-                        for &p in push.iter().rev() {
-                            ns.push(p);
-                        }
-                        let ns_top = ns.last().copied().unwrap_or(self.start_stack);
-                        if seen.insert((q2, ns_top)) {
                             closed.push((q2, ns));
                         }
                     }

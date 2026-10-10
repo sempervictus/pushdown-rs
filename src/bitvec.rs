@@ -154,7 +154,7 @@ impl PdaMachine {
             }
             _ => None,
         };
-        let m = PdaMachine {
+        let mut m = PdaMachine {
             num_states,
             num_inputs,
             num_stack_syms,
@@ -196,8 +196,14 @@ impl PdaMachine {
             flat_a: transitions.iter().map(|t| t.a).collect(),
             flat_top: transitions.iter().map(|t| t.top).collect(),
             flat_next_q: transitions.iter().map(|t| t.next_q).collect(),
+            // The closure table is computed after the validate_bounds (the the closure needs the
+            // validated machine). Initialized empty here, filled by the compute_closure_table.
+            closure_table: Vec::new(),
         };
         m.validate_bounds().map_err(|e| BitvecError::Malformed(e.to_string()))?;
+        // The precomputed epsilon-closure table (the the owl automaton_compute_epsilon_closure
+        // pattern). Computed once at deserialization, looked up in O(1) per mask_at_cfg call.
+        m.compute_closure_table();
         Ok(m)
     }
 }

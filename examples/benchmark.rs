@@ -185,6 +185,7 @@ fn main() {
     flat_a: vec![],
     flat_top: vec![],
     flat_next_q: vec![],
+        closure_table: Vec::new(),
     };
     for (name, input, expect) in [
         ("ab", vec![A, B], true),

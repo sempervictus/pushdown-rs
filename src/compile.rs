@@ -264,7 +264,7 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
     // same sorted bitvec (the three-way layout-identity invariant is preserved:
     // the sort is a reordering, not a change to the transition set).
     transitions.sort_by_key(|t| (t.q, t.a, t.top));
-    Ok(PdaMachine {
+    let mut machine = PdaMachine {
         num_states,
         num_inputs: num_tm,
         num_stack_syms,
@@ -309,7 +309,14 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
         flat_a: transitions.iter().map(|t| t.a).collect(),
         flat_top: transitions.iter().map(|t| t.top).collect(),
         flat_next_q: transitions.iter().map(|t| t.next_q).collect(),
-    })
+        // The precomputed epsilon-closure table (the the owl automaton_compute_epsilon_closure
+        // pattern). Computed once at construction, looked up in O(1) per mask_at_cfg call.
+        closure_table: Vec::new(), // the filled by the compute_closure_table below
+    };
+    // The precomputed epsilon-closure table (the the owl prior art). Computed once at
+    // construction, looked up in O(1) per mask_at_cfg call (the the no the per-call BFS).
+    machine.compute_closure_table();
+    Ok(machine)
 }
 
 /// The CYK algorithm (the O(n^3) decidable word problem for context-free
