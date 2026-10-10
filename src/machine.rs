@@ -1542,9 +1542,16 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
         let mut visited: HashSet<(u32, Vec<u32>)> = HashSet::new();
         let mut frontier: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
         let use_csr = !self.ctrl_offsets.is_empty();
+        // The tight depth bound (the the current stack depth + the max_stack_depth), the no the
+        // unbounded exploration. The accepts_via_eps is the epsilon-closure acceptance check; the
+        // closure is bounded by the machine's push structure (the the six-property #5).
+        let depth_bound = stack.len() + self.max_stack_depth();
         while let Some((cq, cstk)) = frontier.pop() {
             if !visited.insert((cq, cstk.clone())) {
                 continue;
+            }
+            if cstk.len() > depth_bound {
+                continue; // beyond the machine depth bound (the the no the unbounded exploration)
             }
             if self.accepting.contains(&cq) {
                 return true;
