@@ -1576,54 +1576,106 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
     /// O(epsilon_closure) via the CSR (the sorted-by-q array); the linear
     /// fallback for the hand-built machines (the no CSR).
     pub fn accepts_via_eps(&self, q: u32, stack: &[u32]) -> bool {
-        let mut visited: HashSet<(u32, Vec<u32>)> = HashSet::new();
-        let mut frontier: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
+        // The dedup key is dispatched on the growth cycle (the the has_epsilon_growth_cycle):
+        //   - No growth cycle (the VPA bounded-nesting, the acyclic-epsilon): the (state, top)
+        //     dedup (the the GreatGramma Prop 3.5 invariance, the the terminating over the
+        //     num_states x num_stack_syms domain).
+        //   - Growth cycle (the star-loop re-entry, the the one_or_more): the full-stack (state,
+        //     Vec) dedup (the the lossless, the the no the (state, top) collapse that truncates
+        //     the loop state). The full-stack dedup is bounded by the num_states depth (the the
+        //     pigeonhole: a stack deeper than num_states repeats a (state, top) pair).
+        let full_stack = self.has_epsilon_growth_cycle();
+        let depth_bound = self.num_states as usize;
         let use_csr = !self.ctrl_offsets.is_empty();
-        // The tight depth bound (the the current stack depth + the max_stack_depth), the no the
-        // unbounded exploration. The accepts_via_eps is the epsilon-closure acceptance check; the
-        // closure is bounded by the machine's push structure (the the six-property #5).
-        let depth_bound = stack.len() + self.max_stack_depth();
-        while let Some((cq, cstk)) = frontier.pop() {
-            if !visited.insert((cq, cstk.clone())) {
-                continue;
-            }
-            if cstk.len() > depth_bound {
-                continue; // beyond the machine depth bound (the the no the unbounded exploration)
-            }
-            if self.accepting.contains(&cq) {
-                return true;
-            }
-            let ctop = cstk.last().copied().unwrap_or(self.start_stack);
-            if use_csr {
-                let start = self
-                    .ctrl_offsets
-                    .get(cq as usize)
-                    .copied()
-                    .unwrap_or(self.transitions.len() as u32) as usize;
-                let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
-                for t in &self.transitions[start..start + count] {
-                    if t.top != ctop || t.a < self.num_inputs {
-                        continue; // only the epsilon moves (the a == num_inputs) with the matching top
-                    }
-                    let mut ns = cstk.clone();
-                    ns.pop();
-                    for &p in t.push.iter().rev() {
-                        ns.push(p);
-                    }
-                    frontier.push((t.next_q, ns));
+        if full_stack {
+            let mut visited: HashSet<(u32, Vec<u32>)> = HashSet::new();
+            let mut frontier: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
+            visited.insert((q, stack.to_vec()));
+            while let Some((cq, cstk)) = frontier.pop() {
+                if cstk.len() > depth_bound {
+                    continue;
                 }
-            } else {
-                for (q2, push) in self.transition(cq, None, ctop) {
-                    let mut ns = cstk.clone();
-                    ns.pop();
-                    for &p in push.iter().rev() {
-                        ns.push(p);
+                if self.accepting.contains(&cq) {
+                    return true;
+                }
+                let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+                if use_csr {
+                    let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32) as usize;
+                    let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                    for t in &self.transitions[start..start + count] {
+                        if t.top != ctop || t.a < self.num_inputs {
+                            continue;
+                        }
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in t.push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if visited.insert((t.next_q, ns.clone())) {
+                            frontier.push((t.next_q, ns));
+                        }
                     }
-                    frontier.push((q2, ns));
+                } else {
+                    for (q2, push) in self.transition(cq, None, ctop) {
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in push.iter().rev() {
+                            ns.push(p);
+                        }
+                        if visited.insert((q2, ns.clone())) {
+                            frontier.push((q2, ns));
+                        }
+                    }
                 }
             }
+            false
+        } else {
+            // The (state, top) dedup (the the terminating, the the sound for the no-growth-cycle).
+            let mut visited: HashSet<(u32, u32)> = HashSet::new();
+            let mut frontier: Vec<(u32, Vec<u32>)> = vec![(q, stack.to_vec())];
+            let start_top = stack.last().copied().unwrap_or(self.start_stack);
+            visited.insert((q, start_top));
+            while let Some((cq, cstk)) = frontier.pop() {
+                let ctop = cstk.last().copied().unwrap_or(self.start_stack);
+                if !visited.insert((cq, ctop)) {
+                    continue;
+                }
+                if self.accepting.contains(&cq) {
+                    return true;
+                }
+                if use_csr {
+                    let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32) as usize;
+                    let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                    for t in &self.transitions[start..start + count] {
+                        if t.top != ctop || t.a < self.num_inputs {
+                            continue;
+                        }
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in t.push.iter().rev() {
+                            ns.push(p);
+                        }
+                        let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                        if visited.insert((t.next_q, ns_top)) {
+                            frontier.push((t.next_q, ns));
+                        }
+                    }
+                } else {
+                    for (q2, push) in self.transition(cq, None, ctop) {
+                        let mut ns = cstk.clone();
+                        ns.pop();
+                        for &p in push.iter().rev() {
+                            ns.push(p);
+                        }
+                        let ns_top = ns.last().copied().unwrap_or(self.start_stack);
+                        if visited.insert((q2, ns_top)) {
+                            frontier.push((q2, ns));
+                        }
+                    }
+                }
+            }
+            false
         }
-        false
     }
 
     /// The pass-through predicate. True iff the input-consuming transition at config    /// config (q, top) for input `a` preserves the stack top (the push == [top]):
