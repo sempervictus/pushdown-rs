@@ -55,6 +55,20 @@ pub struct CudaPackage {
     /// approximation, the the mask is incomplete). This is the correct gate for the
     /// GPU projection (the no the is_deterministic gate, which is too conservative).
     pub max_closure_width: u32,
+    /// The model's vocab size (the token-level V space). The PDA's `num_inputs`
+    /// is the abstract terminal count; the kernel masks over token IDs
+    /// (0..vocab_size), so the terminal→token bridge is needed to lift the mask.
+    pub vocab_size: u32,
+    /// The terminal → token bridge (the flat [num_terminals * max_bridge_len] U32
+    /// array). `bridge_flat[t * max_bridge_len + i]` = the i-th token of terminal
+    /// `t` (the `bridge_lens[t]` = the count, the `u32::MAX` = = padding).
+    /// The kernel lifts the terminal-level VOB (the `scan_mask` output, over
+    /// 0..num_inputs) to the token-level VOB (over 0..vocab_size) via this
+    /// bridge. The `None` when num_inputs == vocab_size (the PDA built built
+    /// directly over token IDs, the no bridge needed).
+    pub bridge_flat: Option<Vec<u32>>,
+    pub bridge_lens: Option<Vec<u32>>,
+    pub max_bridge_len: u32,
 }
 
 impl CudaPackage {
@@ -105,6 +119,10 @@ impl CudaPackage {
             ctrl_u32_counts,
             is_deterministic: m.is_deterministic(),
             max_closure_width: m.max_closure_width() as u32,
+            vocab_size: 0, // the from_machine has no tokenizer context; the caller (the export_pda_package in .guidance) overwrites this + the bridge fields with the real values
+            bridge_flat: None,
+            bridge_lens: None,
+            max_bridge_len: 0,
         })
     }
 
