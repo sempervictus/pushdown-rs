@@ -69,6 +69,14 @@ pub struct CudaPackage {
     pub bridge_flat: Option<Vec<u32>>,
     pub bridge_lens: Option<Vec<u32>>,
     pub max_bridge_len: u32,
+    /// The reverse bridge (token → terminal ID). `token_to_terminal[tok]` = the
+    /// terminal ID that token `tok` belongs to (the bridge is a partition, so
+    /// each token maps to exactly one terminal). The kernel uses this to map the
+    /// sampled token back to its terminal ID before `advance_pda` (the PDA's
+    /// input alphabet is terminals, not tokens). The `None` when num_inputs ==
+    /// vocab_size (the PDA built directly over token IDs, the no reverse bridge
+    /// needed — the token ID IS the terminal ID).
+    pub token_to_terminal: Option<Vec<u32>>,
 }
 
 impl CudaPackage {
@@ -123,6 +131,7 @@ impl CudaPackage {
             bridge_flat: None,
             bridge_lens: None,
             max_bridge_len: 0,
+            token_to_terminal: None,
         })
     }
 
