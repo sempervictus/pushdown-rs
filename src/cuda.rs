@@ -77,6 +77,16 @@ pub struct CudaPackage {
     /// vocab_size (the PDA built directly over token IDs, the no reverse bridge
     /// needed — the token ID IS the terminal ID).
     pub token_to_terminal: Option<Vec<u32>>,
+    /// The R8 proof: the terminal->token bridge is bit-exact (disjoint + complete +
+    /// no byte-collision over-map). Computed by the consumer (llguidance) at upload
+    /// time, where the grammar + the tokenizer are available. When false, the GPU
+    /// PDA mask path must NOT be used (the bridge would over-/under-map tokens).
+    pub bridge_exact: bool,
+    /// The R2 proof: the grammar's PDA frontier is bounded (no self-embedding
+    /// nonterminal, the pushdown-rs `cfg_has_self_embedding` is false). When false,
+    /// the frontier is infinite and no bounded GPU mask exists — the consumer must
+    /// use the exact CPU Earley mask (or reject the grammar for GPU drafting).
+    pub bounded: bool,
 }
 
 impl CudaPackage {
@@ -132,6 +142,11 @@ impl CudaPackage {
             bridge_lens: None,
             max_bridge_len: 0,
             token_to_terminal: None,
+            // The conservative defaults (the no the GPU path engaging on an
+            // unproven bridge / an unbounded grammar). The caller (the llguidance
+            // export_pda_package) overwrites these with the proven values.
+            bridge_exact: false,
+            bounded: false,
         })
     }
 
