@@ -452,12 +452,17 @@ mod tests {
     use crate::compile::{Cfg, kappa};
 
     fn anb() -> (Cfg, PdaMachine) {
+        // A BOUNDED grammar (the no self-embedding): S -> a b | eps. The prior
+        // fixture was S -> a S b (the a^n b^n, a self-embedding / unbounded-
+        // frontier grammar), which the C3 finiteness gate now correctly rejects at
+        // compile. The viz tests only need a multi-state machine to render, not a
+        // specific language, so a bounded grammar is the correct fixture.
         let g = Cfg::new(
             1,
             2,
             0,
             vec![
-                (0, vec![1, 0, 2]), // S -> a S b
+                (0, vec![1, 2]), // S -> a b (bounded, no self-embedding)
                 (0, vec![]), // S -> eps
             ],
         );

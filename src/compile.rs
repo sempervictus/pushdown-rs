@@ -86,6 +86,69 @@ pub fn rtn_state_names<G: Grammar>(g: &G) -> Vec<String> {
 
 /// Compile an abstract grammar to a PDA machine (the RTN construction).
 /// Proves the input is a valid CFG (the validate) before compiling.
+/// The EXACT CFG self-embedding test (the R2 / C3 decision, computed on the
+/// grammar, not the compiled PDA). A nonterminal X is self-embedding iff X
+/// appears, directly or transitively, on the right-hand side of a production of
+/// X — the classic CFG property that makes the PDA's stack (and hence its
+/// frontier) unbounded. Decided by a reachability closure over the "X derives Y"
+/// relation: build the graph X -> {each nonterminal on X's RHS}, then X is
+/// self-embedding iff X reaches X.
+///
+/// This is the authoritative bounded/unbounded decision the consumer (llguidance)
+/// uses to route a grammar to the exact CPU Earley mask (unbounded) vs. the fast
+/// GPU PDA frontier path (bounded). It is exact (no over-approximation): a
+/// balanced call/return grammar like `A -> B B` is correctly BOUNDED (A does not
+/// derive A), unlike the conservative PDA epsilon-SCC test.
+pub fn cfg_has_self_embedding<G: Grammar>(g: &G) -> bool {
+    let num_nt = g.nonterminals().len();
+    if num_nt == 0 {
+        return false;
+    }
+    // The "X derives Y" graph, via the trait's nonterminal_id (the authoritative
+    // symbol -> nonterminal-index map, the no an ad-hoc numeric assumption).
+    let mut derives: Vec<Vec<usize>> = vec![Vec::new(); num_nt];
+    for (lhs, rhs) in g.productions() {
+        // The lhs is a Nonterminal; get its index via nonterminal_index (the
+        // trait method that takes &Nonterminal, the no nonterminal_id which takes
+        // &Symbol).
+        let x = g.nonterminal_index(&lhs) as usize;
+        if x >= num_nt {
+            continue;
+        }
+        for sym in rhs {
+            // The rhs symbols are the Symbol type; nonterminal_id maps a Symbol to
+            // its nonterminal index (the None when the symbol is a terminal).
+            if let Some(y) = g.nonterminal_id(&sym) {
+                let y = y as usize;
+                if y < num_nt {
+                    derives[x].push(y);
+                }
+            }
+        }
+    }
+    // The transitive "X derives Y" closure (the Warshall, the O(nt^3), fine at init).
+    let mut reach: Vec<Vec<bool>> = vec![vec![false; num_nt]; num_nt];
+    for x in 0..num_nt {
+        for &y in &derives[x] {
+            reach[x][y] = true;
+        }
+    }
+    for k in 0..num_nt {
+        for i in 0..num_nt {
+            if !reach[i][k] {
+                continue;
+            }
+            for j in 0..num_nt {
+                if reach[k][j] {
+                    reach[i][j] = true;
+                }
+            }
+        }
+    }
+    // X is self-embedding iff X derives X (a non-trivial cycle in the derives graph).
+    (0..num_nt).any(|x| reach[x][x])
+}
+
 pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
     g.validate()?; // the prove the input is a valid CFG
     let num_nt = g.nonterminals().len() as u32;
@@ -316,6 +379,13 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
     // The precomputed epsilon-closure table (the the owl prior art). Computed once at
     // construction, looked up in O(1) per mask_at_cfg call (the the no the per-call BFS).
     machine.compute_closure_table();
+    // Unbounded-frontier grammars (self-embedding nonterminals, the one_or_more
+    // loops) are VALID context-free grammars and compile fine. The C3 decision
+    // (which mask algorithm serves them) is made by the CONSUMER (llguidance), not
+    // here: a bounded grammar uses the fast GPU PDA frontier path; an unbounded
+    // grammar uses the exact CPU Earley mask (the GPU path cannot represent its
+    // infinite frontier). `has_unbounded_frontier` (the machine method) is the
+    // consumer's decision input. compile does NOT reject.
     Ok(machine)
 }
 
@@ -646,6 +716,10 @@ pub enum CfgError {
     },
     /// A catch-all error (the export failures, the I/O).
     Other(String),
+    /// The C3 reject: the grammar's PDA has an unbounded frontier (a self-embedding
+    /// nonterminal), so no exact mask exists. The grammar must be rewritten bounded
+    /// before it can be used for constrained decoding.
+    UnboundedFrontier,
 }
 impl std::fmt::Display for CfgError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -660,8 +734,14 @@ CfgError::IndexMapping { what, got, expected_lt } => write!(
                   into a LOCAL index position (the 0..num_nonterminals or 0..num_terminals). \
                   Check the Grammar impl's terminal_id/nonterminal_id/start_id."
              ),
-             CfgError::Other(msg) => write!(f, "{msg}"),
-         }
+CfgError::Other(msg) => write!(f, "{msg}"),
+              CfgError::UnboundedFrontier => write!(
+                  f,
+                  "the grammar's PDA has an unbounded frontier (a self-embedding nonterminal); \
+                   no exact mask exists. Rewrite the grammar bounded (cap the repetition) \
+                   before using it for constrained decoding."
+              ),
+          }
     }
 }
 impl std::error::Error for CfgError {}

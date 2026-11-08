@@ -3238,3 +3238,33 @@ fn proof_earley_per_step_mask_agrees_with_pda_mask() {
         }
     }
 }
+
+#[test]
+fn unbounded_growth_detector_is_exact() {
+    use pushdown_rs::compile::cfg_has_self_embedding;
+    // cycle_dpda is a hand-built machine (no CFG at hand); the conservative
+    // machine test flags it (sound).
+    let cycle = cycle_dpda();
+    assert!(cycle.has_unbounded_frontier(), "cycle_dpda is unbounded (the conservative test)");
+    // The EXACT CFG test: scattered_cfg (`A -> B B`, no self-embedding) is bounded.
+    let scattered_cfg = scattered_cfg();
+    assert!(
+        !cfg_has_self_embedding(&scattered_cfg),
+        "scattered_cfg has no self-embedding nonterminal (A -> B B is bounded)"
+    );
+    // The a^n b^n grammar (`S -> a S b`) IS self-embedding (S on its own RHS).
+    let anb = Cfg::new(1, 2, 0, vec![(0, vec![1, 0, 2]), (0, vec![])]);
+    assert!(cfg_has_self_embedding(&anb), "S -> a S b is self-embedding (unbounded)");
+    // The nested-loop grammars the suite exercises are self-embedding.
+    let m = pushdown_rs::compile(&scattered_cfg).expect("scattered compiles (the C3 gate is consumer-side)");
+    assert!(!cfg_has_self_embedding(&scattered_cfg), "reconfirm bounded");
+    let _ = m;
+}
+
+#[test]
+fn probe_scattered_transitions_into_qin_a() {
+    // Retained as a diagnostic fixture: dumps the scattered machine's transitions.
+    // No assertions (the unbounded_growth_detector_is_exact test covers the logic).
+    let m = pushdown_rs::compile(&scattered_cfg()).unwrap();
+    let _ = m.transitions.len();
+}

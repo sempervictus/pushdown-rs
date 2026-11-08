@@ -756,6 +756,24 @@ impl PdaMachine {
         scc_has_growth.iter().any(|&g| g)
     }
 
+    /// The unbounded-frontier gate (the R2 / C3 decision input). Returns true iff the
+    /// machine's PDA frontier is (likely) infinite, so the consumer should use the
+    /// exact CPU Earley mask rather than the bounded GPU PDA frontier path.
+    ///
+    /// This is the CONSERVATIVE test (the `has_epsilon_growth_cycle`: any epsilon
+    /// SCC of size > 1). It is SOUND in the firewall direction: it never reports
+    /// "bounded" for a genuinely unbounded machine (so the GPU path is never used
+    /// for a grammar it can't handle exactly). It MAY report "unbounded" for a
+    /// bounded machine (e.g. a balanced call/return `A -> B B`), in which case the
+    /// consumer uses the exact CPU mask — correct, just slower. The EXACT
+    /// self-embedding test lives on the CFG (`compile::cfg_has_self_embedding`),
+    /// which the consumer (llguidance) calls directly to make the precise
+    /// bounded/unbounded decision; this machine method is the safe fallback when
+    /// the CFG is not at hand.
+    pub fn has_unbounded_frontier(&self) -> bool {
+        self.has_epsilon_growth_cycle()
+    }
+
     /// The NPDA epsilon-closure advance (the ALL next-configs, the no the single-config
     /// advance_eps). From the input config-set, follow the epsilon closure of each config +
     /// collect EVERY terminal-`a` move (the no the first). This is the sound step for a
