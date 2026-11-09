@@ -264,6 +264,8 @@ fn qwen_scale_npda() -> PdaMachine {
         flat_a: vec![],
         flat_top: vec![],
         flat_next_q: vec![],
+        closure_table: Vec::new(),
+            mask_table: Vec::new(),
     }
 }
 
@@ -287,5 +289,65 @@ fn bench_qwen_scale_npda(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_csr_vs_linear_mask, bench_sequence_length_flat, bench_dispatched_gather, bench_npda_frontier_ops, bench_qwen_scale_npda);
+criterion_group!(benches, bench_csr_vs_linear_mask, bench_sequence_length_flat, bench_dispatched_gather, bench_npda_frontier_ops, bench_qwen_scale_npda, bench_settled_ratio_probe);
 criterion_main!(benches);
+
+/// The settled-ratio probe: walk the tool-call CFG via advance_eps (the single-
+/// config deterministic walk) and report, at each step, whether the config is
+/// SETTLED (the has_epsilon_successor false, the mask_at_cfg_settled O(1) CSR
+/// applies) or PENDING-EPSILON (the mask_at_cfg epsilon-closure BFS is needed).
+/// This determines the realistic PDA mask cost: the settled steps are ~2.75ns
+/// (the CSR), the pending steps are ~6.76us (the BFS). The ratio is the
+/// production-relevant number.
+fn bench_settled_ratio_probe(c: &mut Criterion) {
+    let g = tool_call_cfg();
+    let m = pushdown_rs::compile(&g).expect("compile");
+    eprintln!(
+        "PDA-CLASSIFY classify={:?} growth_cycle={} is_deterministic={} states={} transitions={}",
+        m.classify(),
+        m.has_epsilon_growth_cycle(),
+        m.is_deterministic(),
+        m.num_states,
+        m.transitions.len()
+    );
+    // Walk a legal derivation, tracking the settled/pending ratio.
+    let mut cur = (m.start_state, vec![m.start_stack]);
+    let mut settled = 0usize;
+    let mut pending = 0usize;
+    let mut steps = 0usize;
+    for _ in 0..1000 {
+        let top = cur.1.last().copied().unwrap_or(m.start_stack);
+        if m.has_epsilon_successor(cur.0, top) {
+            pending += 1;
+        } else {
+            settled += 1;
+        }
+        steps += 1;
+        let mask = m.mask_at_cfg(cur.0, &cur.1);
+        let Some(a) = mask.first().copied() else {
+            break;
+        };
+        match m.advance_eps(cur.0, &cur.1, a) {
+            Some(nc) => cur = nc,
+            None => break,
+        }
+    }
+    let mut group = c.benchmark_group("settled_ratio_probe");
+    group.bench_function("ratio_report", |b| {
+        b.iter(|| {
+            eprintln!(
+                "SETTLED-RATIO steps={} settled={} pending={} (the settled fraction = {:.2}; the settled steps use the 2.75ns CSR, the pending steps use the 6.76us BFS)",
+                steps,
+                settled,
+                pending,
+                if steps > 0 {
+                    settled as f64 / steps as f64
+                } else {
+                    0.0
+                }
+            );
+            black_box((steps, settled, pending))
+        })
+    });
+    group.finish();
+}

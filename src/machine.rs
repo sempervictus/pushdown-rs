@@ -99,6 +99,12 @@ pub struct PdaMachine {
     /// same as the CSR fields). Computed eagerly at construction (the the `new` + the
     /// `compile` + the `from_bitvec`), looked up in O(1) per mask_at_cfg call.
     pub closure_table: Vec<Vec<(u32, u32)>>,
+    /// The precomputed allowed-inputs mask per (state, top) (the the mask_at_cfg result,
+    /// the the O(1) lookup). Populated by the compute_closure_table alongside the
+    /// closure_table. The mask_at_cfg (the the table path) reads this directly (the the
+    /// no the per-call closure scan, the the 6.76us -> the 2.75ns). Excluded from equality
+    /// (the the derived data, the the same as the closure_table).
+    pub mask_table: Vec<Vec<u32>>,
 }
 
 // The CSR fields (ctrl_offsets, ctrl_counts) are derived data (computed from
@@ -202,6 +208,10 @@ impl PdaMachine {
         // The table is indexed by (state, top) -> the set of (state, top) pairs in the closure.
         // The size is num_states x num_stack_syms (the the finite domain).
         let mut table: Vec<Vec<(u32, u32)>> = vec![Vec::new(); n_states * n_tops];
+        // The mask_table (the precomputed allowed-inputs per (state, top), the the O(1)
+        // mask_at_cfg lookup). Populated alongside the closure table.
+        let mut mask_table: Vec<Vec<u32>> = vec![Vec::new(); n_states * n_tops];
+        let use_csr = !self.ctrl_offsets.is_empty();
         for q in 0..n_states {
             for top in 0..n_tops {
                 let idx = q * n_tops + top;
@@ -214,7 +224,7 @@ impl PdaMachine {
                     let (cq, ctop) = closed[i];
                     i += 1;
                     // The epsilon moves from (cq, ctop) (the the a == num_inputs, the the top == ctop).
-                    if !self.ctrl_offsets.is_empty() {
+                    if use_csr {
                         let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32) as usize;
                         let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
                         for j in 0..count {
@@ -245,10 +255,36 @@ impl PdaMachine {
                         }
                     }
                 }
-                table[idx] = closed;
+                table[idx] = closed.clone();
+                // The precomputed allowed-inputs mask over the closure (the the same scan
+                // the mask_at_cfg table path does, but precomputed once at construction).
+                // The O(closure_width x transitions_per_state) cost is paid once, not per
+                // mask_at_cfg call.
+                let mut allowed: Vec<u32> = Vec::with_capacity(self.num_inputs as usize);
+                for &(cq, ctop) in &closed {
+                    if use_csr {
+                        let start = self.ctrl_offsets.get(cq as usize).copied().unwrap_or(self.transitions.len() as u32) as usize;
+                        let count = self.ctrl_counts.get(cq as usize).copied().unwrap_or(0) as usize;
+                        for j in 0..count {
+                            let t = &self.transitions[start + j];
+                            if t.a < self.num_inputs && t.top == ctop && !allowed.contains(&t.a) {
+                                allowed.push(t.a);
+                            }
+                        }
+                    } else {
+                        for a in 0..self.num_inputs {
+                            if !self.lookup(cq, Some(a), ctop).is_empty() && !allowed.contains(&a) {
+                                allowed.push(a);
+                            }
+                        }
+                    }
+                }
+                allowed.sort();
+                mask_table[idx] = allowed;
             }
         }
         self.closure_table = table;
+        self.mask_table = mask_table;
     }
 
     /// The precomputed epsilon-closure lookup (the the O(1) replacement for the per-call BFS).
@@ -312,6 +348,7 @@ impl PdaMachine {
             flat_top,
             flat_next_q,
             closure_table: Vec::new(), // the filled by the compute_closure_table below
+            mask_table: Vec::new(), // the filled by the compute_closure_table below
         };
         m.validate_bounds()?;
         // The precomputed epsilon-closure table (the the owl automaton_compute_epsilon_closure
@@ -1331,15 +1368,40 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
         // dedup is NOT sound (the the cycle keeps the top constant while the stack grows, so the
         // terminal states reachable only at a deeper stack are missed). The growth-cycle machines
         // use the per-call full-stack BFS (the the no the precomputed table).
-        if !self.has_epsilon_growth_cycle() && !self.closure_table.is_empty() {
+        // The precomputed (state, top) closure table is sound ONLY for the no-growth-
+        // cycle machines (the bounded nesting, the (state, top) dedup is exact).
+        // The growth-cycle machines (the star-loop, the one_or_more re-entry, the
+        // A -> B B nonterminal expansion) have a lossy (state, top) closure (the
+        // distinct stacks collapse to the same (state, top)), so they MUST use the
+        // per-call full-stack BFS (the no the table). The classify()==VisiblyPushdown
+        // check is NOT sufficient: a VPA's input moves are input-driven, but its
+        // EPSILON moves (the nonterminal expansions, the A -> B B call) can still
+        // have a growth cycle that makes the (state, top) closure lossy. The
+        // has_epsilon_growth_cycle is the sound gate (the no the VPA override).
+        let use_table = !self.closure_table.is_empty() && !self.has_epsilon_growth_cycle();
+        if use_table {
             // The precomputed table (the the O(1) lookup, the the no-growth-cycle machines).
             // The table is empty for the direct-construction sites (the the tests, the the
             // examples) that don't call the compute_closure_table — fall back to the per-call BFS.
             let top = stack.last().copied().unwrap_or(self.start_stack);
+            // The O(1) precomputed mask (the mask_table, the compute_closure_table populates
+            // it alongside the closure_table). When populated, this is the 2.75ns CSR
+            // lookup (the no the 6.76us per-call closure scan). The mask_table is empty for
+            // the direct-construction sites (the tests, the examples) — fall back to the
+            // closure scan (the no the per-call BFS, the the prior behavior).
+            if !self.mask_table.is_empty() {
+                let idx = (q as usize) * (self.num_stack_syms as usize) + (top as usize);
+                if let Some(mask) = self.mask_table.get(idx) {
+                    return mask.clone();
+                }
+            }
             let closure = self.closure_at(q, top);
-            // Collect the allowed inputs over the closure (the the O(closure_width) scan, the the
-            // no the per-call BFS).
-            let mut allowed: HashSet<u32> = HashSet::new();
+            // Collect the allowed inputs over the closure (the O(closure_width) scan, the
+            // no the per-call BFS). The allowed set is bounded by num_inputs (the
+            // terminal count), so a small fixed buffer + the dedup is faster than
+            // the HashSet (the no the heap alloc + the hash). The result is sorted
+            // (the the caller's expectation, the the mask_at_cfg contract).
+            let mut allowed_buf: Vec<u32> = Vec::with_capacity(self.num_inputs as usize);
             let use_csr = !self.ctrl_offsets.is_empty();
             for &(cq, ctop) in closure {
                 if use_csr {
@@ -1352,20 +1414,20 @@ pub fn mask_at_cfg(&self, q: u32, stack: &[u32]) -> Vec<u32> {
                     for j in 0..count {
                         let t = &self.transitions[start + j];
                         if t.a < self.num_inputs && t.top == ctop {
-                            allowed.insert(t.a);
+                            allowed_buf.push(t.a);
                         }
                     }
                 } else {
                     for a in 0..self.num_inputs {
                         if !self.lookup(cq, Some(a), ctop).is_empty() {
-                            allowed.insert(a);
+                            allowed_buf.push(a);
                         }
                     }
                 }
             }
-            let mut result: Vec<u32> = allowed.into_iter().collect();
-            result.sort();
-            return result;
+            allowed_buf.sort();
+            allowed_buf.dedup();
+            return allowed_buf;
         }
         // The growth-cycle machines (the the star-loop): the per-call full-stack BFS (the the
         // no the precomputed table, the the (state, top) dedup is not sound for the growth cycle).

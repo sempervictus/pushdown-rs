@@ -75,6 +75,7 @@ fn anb_n_dpda() -> PdaMachine {
     flat_top: vec![],
     flat_next_q: vec![],
         closure_table: Vec::new(),
+            mask_table: Vec::new(),
     }
 }
 
@@ -623,6 +624,7 @@ fn proof_from_bitvec_resorts_for_csr_invariant() {
         flat_top: vec![],
         flat_next_q: vec![],
         closure_table: Vec::new(),
+            mask_table: Vec::new(),
     };
     // The to_bitvec writes the transitions in the stored (UNsorted) order.
     let unsorted_bits = unsorted_m.to_bitvec();
@@ -1655,6 +1657,7 @@ fn proof_unbounded_distance_multi_symbol_push_over_deep_stack() {
         flat_top: vec![],
         flat_next_q: vec![],
         closure_table: Vec::new(),
+            mask_table: Vec::new(),
     };
     let unbounded = BoundedSummary::compute_unbounded(&m);
     let oracle = independent_shortest_distance(&m);
@@ -2032,6 +2035,7 @@ fn proof_settled_mask_underapproximates_closure_mask_when_nondeterministic() {
         flat_top: vec![],
         flat_next_q: vec![],
         closure_table: Vec::new(),
+            mask_table: Vec::new(),
     };
     // The machine is genuinely non-deterministic (the two eps branches from q0).
     assert!(!m.is_deterministic(), "the machine must be non-deterministic for the proof");
@@ -2816,6 +2820,7 @@ fn cycle_dpda() -> PdaMachine {
         flat_top: vec![],
         flat_next_q: vec![],
         closure_table: Vec::new(),
+            mask_table: Vec::new(),
     }
 }
 
@@ -2920,6 +2925,7 @@ fn proof_project_batch_sound_where_settled_is_not() {
         flat_top: vec![],
         flat_next_q: vec![],
         closure_table: Vec::new(),
+            mask_table: Vec::new(),
     };
     assert!(!m.is_deterministic(), "the machine is non-deterministic (the two eps branches from q0)");
 
@@ -3194,6 +3200,7 @@ fn debug_mask_at_cfg_minimal() {
         flat_top: vec![],
         flat_next_q: vec![],
         closure_table: Vec::new(),
+            mask_table: Vec::new(),
     };
     eprintln!("[DBG minimal] mask_at_cfg(0, &[]) = {:?}", m.mask_at_cfg(0, &[]));
     eprintln!("[DBG minimal] mask_at_cfg(0, &[0]) = {:?}", m.mask_at_cfg(0, &[0]));

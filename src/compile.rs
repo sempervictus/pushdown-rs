@@ -375,6 +375,7 @@ pub fn compile<G: Grammar>(g: &G) -> Result<PdaMachine, CfgError> {
         // The precomputed epsilon-closure table (the the owl automaton_compute_epsilon_closure
         // pattern). Computed once at construction, looked up in O(1) per mask_at_cfg call.
         closure_table: Vec::new(), // the filled by the compute_closure_table below
+        mask_table: Vec::new(), // the filled by the compute_closure_table below
     };
     // The precomputed epsilon-closure table (the the owl prior art). Computed once at
     // construction, looked up in O(1) per mask_at_cfg call (the the no the per-call BFS).

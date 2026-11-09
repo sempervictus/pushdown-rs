@@ -85,6 +85,7 @@
 //!     flat_top: vec![],
 //!     flat_next_q: vec![],
 //!     closure_table: Vec::new(), // the computed via the m.compute_closure_table() (the the owl prior art)
+//!     mask_table: Vec::new(), // the computed via the m.compute_closure_table()
 //! };
 //! m.compute_closure_table();
 //! assert!(m.is_deterministic());

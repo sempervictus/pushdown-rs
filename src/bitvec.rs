@@ -199,6 +199,7 @@ impl PdaMachine {
             // The closure table is computed after the validate_bounds (the the closure needs the
             // validated machine). Initialized empty here, filled by the compute_closure_table.
             closure_table: Vec::new(),
+            mask_table: Vec::new(),
         };
         m.validate_bounds().map_err(|e| BitvecError::Malformed(e.to_string()))?;
         // The precomputed epsilon-closure table (the the owl automaton_compute_epsilon_closure
