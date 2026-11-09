@@ -87,6 +87,13 @@ pub struct CudaPackage {
     /// the frontier is infinite and no bounded GPU mask exists — the consumer must
     /// use the exact CPU Earley mask (or reject the grammar for GPU drafting).
     pub bounded: bool,
+    /// The R2/R8 coverage proof: the grammar's token set is determined ENTIRELY by the
+    /// CFG's terminals (the no lexer-augmented tokens like the numeric int-ranges, the
+    /// string regex lexemes, the %ignore skip). When false, the bridge (even if
+    /// disjoint) does not cover the grammar's full token set, so the GPU PDA mask is
+    /// incomplete and the consumer must use the exact CPU Earley mask. Computed by the
+    /// consumer (llguidance) at upload time from the grammar's static lexer spec.
+    pub pure_cfg: bool,
 }
 
 impl CudaPackage {
@@ -147,6 +154,7 @@ impl CudaPackage {
             // export_pda_package) overwrites these with the proven values.
             bridge_exact: false,
             bounded: false,
+            pure_cfg: false,
         })
     }
 
